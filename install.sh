@@ -7,7 +7,7 @@ DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
 mkdir -p "$CLAUDE_DIR/skills"
-for skill in "$DOTFILES"/claude/skills/*/; do
+for skill in "$DOTFILES"/.copilot/skills/*/; do
   name="$(basename "$skill")"
   target="$CLAUDE_DIR/skills/$name"
   # Replace only links/dirs we own; keep anything else the user has.
@@ -18,4 +18,4 @@ for skill in "$DOTFILES"/claude/skills/*/; do
   fi
 done
 
-echo "Installed $(ls -d "$DOTFILES"/claude/skills/*/ | wc -l | tr -d ' ') skills into $CLAUDE_DIR/skills"
+echo "Installed $(ls -d "$DOTFILES"/.copilot/skills/*/ | wc -l | tr -d ' ') skills into $CLAUDE_DIR/skills"
