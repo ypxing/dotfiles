@@ -10,10 +10,12 @@ Personal config for Claude Code, mainly so cloud agents get my skills.
 
 ## Cloud agents
 
-Add this to the cloud environment's setup script:
+The repo is private, so the cloud environment needs a read-only token. Create a fine-grained
+PAT scoped to this repo only (Contents: read), store it as the env var `DOTFILES_TOKEN`, and add
+this to the environment's setup script:
 
 ```bash
-git clone --depth 1 https://github.com/ypxing/dotfiles ~/dotfiles && ~/dotfiles/install.sh
+git clone --depth 1 "https://x-access-token:${DOTFILES_TOKEN}@github.com/ypxing/dotfiles" ~/dotfiles && ~/dotfiles/install.sh
 ```
 
 The same `install.sh` works for GitHub Codespaces' dotfiles feature.
