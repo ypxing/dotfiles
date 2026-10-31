@@ -9,15 +9,15 @@ One place for my agent skills: my own, plus pinned third-party sources such as
 - `skills/<name>/SKILL.md` — my personal skills. Edit here. They install last, so they win a name clash.
 - `sources.txt` — third-party sources, one per line: `<owner/repo>#<tag> [skill,skill,...]`. No list means every skill.
 - `pi-packages.txt` — Pi packages, pinned (`npm:<name>@<version>`). Installed with `pi install` when `pi` is selected and on PATH.
-- `claude-plugins.txt` — Claude Code plugins (`<marketplace> <plugin>@<marketplace>`). Installed and updated to the latest
-  version with `claude plugin` when `claude-code` is selected and on PATH. claude-hud needs `/claude-hud:setup` once per
-  machine to point the status line at it.
+- `claude-plugins.txt` — Claude Code plugins, pinned (`<owner/repo>#<tag> <plugin>@<marketplace>`). Installed with
+  `claude plugin` when `claude-code` is selected and on PATH; a moved pin reinstalls the plugin at the new tag.
+  claude-hud needs `/claude-hud:setup` once per machine to point the status line at it.
 - `install.sh [agent...]` — installs all of the above, user level; skills via `npx skills add -g --copy`. Default agents:
   `claude-code github-copilot codex pi cursor`. Needs Node.js. Safe to re-run.
 - `.copilot/skills/` — generated copy for Copilot cloud, which runs no scripts. Don't edit; rebuild with
   `scripts/build-copilot-skills.sh`. The **Check skills** workflow fails when it's stale.
-- `scripts/bump-sources.sh` — moves each source to its latest release tag and each Pi package to its latest version.
-- `.github/workflows/update-skills.yml` — daily, opens a PR when a source or Pi package has a new release.
+- `scripts/bump-sources.sh` — moves each pinned source, Pi package and Claude plugin to its latest release.
+- `.github/workflows/update-skills.yml` — daily, opens a PR when any pin has a new release.
 
 Where skills land: Claude Code in `~/.claude/skills/`; Copilot, Codex, Pi and Cursor share `~/.agents/skills/`.
 

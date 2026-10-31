@@ -43,10 +43,17 @@ fi
 if [[ "$agents" == *" claude-code "* ]]; then
   if command -v claude >/dev/null; then
     entries claude-plugins.txt | while read -r marketplace plugin _; do
+      name="${plugin#*@}" ref=""
+      [[ "$marketplace" == *'#'* ]] && ref="${marketplace#*#}"
+      # Re-adding a marketplace with a new #tag is a no-op, so a moved pin needs remove + add.
+      current="$(claude plugin marketplace list --json </dev/null | node -e '
+        const m = JSON.parse(require("fs").readFileSync(0, "utf8")).find(m => m.name === process.argv[1]);
+        console.log(m ? m.ref || "" : "-")' "$name")"
+      if [ "$current" != "-" ] && [ "$current" != "$ref" ]; then
+        claude plugin marketplace remove "$name" </dev/null
+      fi
       claude plugin marketplace add "$marketplace" </dev/null
-      claude plugin marketplace update "${plugin#*@}" </dev/null
       claude plugin install "$plugin" </dev/null
-      claude plugin update "$plugin" </dev/null
     done
   else
     echo "skip Claude plugins: claude not on PATH" >&2
