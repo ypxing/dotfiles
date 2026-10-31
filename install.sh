@@ -58,4 +58,12 @@ if [[ "$agents" == *" claude-code "* ]]; then
   else
     echo "skip Claude plugins: claude not on PATH" >&2
   fi
+
+  # claude-hud settings: the repo copy wins; a differing local file is kept as config.json.bak.
+  hud="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/claude-hud/config.json"
+  if ! cmp -s "$DOTFILES/claude/claude-hud.json" "$hud"; then
+    mkdir -p "$(dirname "$hud")"
+    [ -f "$hud" ] && cp "$hud" "$hud.bak"
+    cp "$DOTFILES/claude/claude-hud.json" "$hud"
+  fi
 fi

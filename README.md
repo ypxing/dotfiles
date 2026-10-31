@@ -12,6 +12,8 @@ One place for my agent skills: my own, plus pinned third-party sources such as
 - `claude-plugins.txt` — Claude Code plugins, pinned (`<owner/repo>#<tag> <plugin>@<marketplace>`). Installed with
   `claude plugin` when `claude-code` is selected and on PATH; a moved pin reinstalls the plugin at the new tag.
   claude-hud needs `/claude-hud:setup` once per machine to point the status line at it.
+- `claude/claude-hud.json` — claude-hud settings, copied to `~/.claude/plugins/claude-hud/config.json` with claude-code.
+  Edit here, not with `/claude-hud:configure`: the next `install.sh` replaces a differing local file (kept as `.bak`).
 - `install.sh [agent...]` — installs all of the above, user level; skills via `npx skills add -g --copy`. Default agents:
   `claude-code github-copilot codex pi cursor`. Needs Node.js. Safe to re-run.
 - `.copilot/skills/` — generated copy for Copilot cloud, which runs no scripts. Don't edit; rebuild with
