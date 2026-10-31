@@ -1,14 +1,10 @@
 name: Update skills
 
-# Opens a PR when ypxing/coding-crew has a new release. Nothing reaches cloud sessions until it's merged.
+# Opens a PR when a source in sources.txt or a pin in pi-packages.txt or claude-plugins.txt has a new release. Nothing reaches cloud sessions until it's merged.
 on:
   schedule:
     - cron: '0 20 * * *'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: coding-crew release tag (default latest)
-        required: false
 
 permissions:
   contents: write
@@ -24,38 +20,34 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Pick release
-        id: tag
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
+      - name: Bump sources
+        id: bump
         run: |
-          tag="$INPUT_TAG"
-          [ -n "$tag" ] || tag="$(gh release view -R ypxing/coding-crew --json tagName --jq .tagName)"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "branch=update-skills/$tag" >> "$GITHUB_OUTPUT"
-          if [ "$tag" = "$(cat .coding-crew-version 2>/dev/null)" ]; then
-            echo "Already on $tag"; echo "skip=true" >> "$GITHUB_OUTPUT"
-          elif git ls-remote --exit-code --heads origin "update-skills/$tag" >/dev/null; then
-            echo "PR branch for $tag already exists"; echo "skip=true" >> "$GITHUB_OUTPUT"
+          scripts/bump-sources.sh | tee "$RUNNER_TEMP/changes.txt"
+          if git diff --quiet sources.txt pi-packages.txt claude-plugins.txt; then
+            echo "All sources and packages on their latest release"; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          branch="update-skills/$(cat sources.txt pi-packages.txt claude-plugins.txt | sha256sum | cut -c1-12)"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "PR branch $branch already exists"; echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build skills
-        if: steps.tag.outputs.skip != 'true'
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: scripts/update-skills.sh "$TAG"
+      - name: Build Copilot skills
+        if: steps.bump.outputs.skip != 'true'
+        run: scripts/build-copilot-skills.sh
 
       - name: Open PR
-        if: steps.tag.outputs.skip != 'true'
+        if: steps.bump.outputs.skip != 'true'
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
-          BRANCH: ${{ steps.tag.outputs.branch }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
           git add -A
-          git commit -m "Update skills to coding-crew $TAG"
+          git commit -m "Update skill sources" -m "$(cat "$RUNNER_TEMP/changes.txt")"
           git push origin "$BRANCH"
-          printf 'Release notes: https://github.com/ypxing/coding-crew/releases/tag/%s\n\nReview the skill changes before merging: once merged, new Copilot and Claude cloud sessions use them.\n' "$TAG" > "$RUNNER_TEMP/body.md"
-          gh pr create --base main --head "$BRANCH" --title "Update skills to coding-crew $TAG" --body-file "$RUNNER_TEMP/body.md"
+          { echo 'Source updates:'; echo; sed 's/^/- /' "$RUNNER_TEMP/changes.txt"; echo
+            echo 'Review the skill changes before merging: once merged, new cloud sessions use them.'; } > "$RUNNER_TEMP/body.md"
+          gh pr create --base main --head "$BRANCH" --title "Update skill sources" --body-file "$RUNNER_TEMP/body.md"
