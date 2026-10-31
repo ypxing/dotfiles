@@ -11,8 +11,8 @@ One place for my agent skills: my own, plus pinned third-party sources such as
 - `pi-packages.txt` — Pi packages, pinned (`npm:<name>@<version>`). Installed with `pi install` when `pi` is selected and on PATH.
 - `claude-plugins.txt` — Claude Code plugins, pinned (`<owner/repo>#<tag> <plugin>@<marketplace> <commit sha>`).
   Installed with `claude plugin` when `claude-code` is selected and on PATH; a moved pin reinstalls the plugin at the
-  new tag, and a tag that no longer resolves to its sha fails the install. `install.sh` also points the status line at
-  claude-hud, as `/claude-hud:setup` would, unless `settings.json` already has a status line of your own.
+  new tag, and a tag that no longer resolves to its sha fails the install. `install.sh` also runs claude-hud's own setup
+  script, as `/claude-hud:setup` does, unless `settings.json` already has a status line of your own.
 - `claude/claude-hud.json` — claude-hud settings, copied to `~/.claude/plugins/claude-hud/config.json` with claude-code.
   Edit here, not with `/claude-hud:configure`: the next `install.sh` replaces a differing local file (kept as `.bak`).
 - `install.sh [agent...]` — installs all of the above, user level; skills via `npx skills add -g --copy`. Default agents:

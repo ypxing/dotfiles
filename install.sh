@@ -58,25 +58,30 @@ if [[ "$agents" == *" claude-code "* ]]; then
       if [ -n "$sha" ]; then
         head="$(git -C "$claude_home/plugins/marketplaces/$name" rev-parse HEAD)"
         if [ "$head" != "$sha" ]; then
-          echo "$marketplace resolved to $head, expected $sha" >&2
+          echo "$marketplace resolved to $head, expected $sha; the tag may have moved upstream." >&2
+          echo "Review it, then update claude-plugins.txt, or run: claude plugin marketplace remove $name" >&2
           exit 1
         fi
       fi
       claude plugin install "$plugin" </dev/null
     done
 
-    # Point the status line at the installed claude-hud, as /claude-hud:setup would, unless it's set to something else.
-    hud_dir="$(ls -td "$claude_home"/plugins/cache/claude-hud/claude-hud/*/ 2>/dev/null | head -1)"
-    hud_dir="${hud_dir%/}"
-    if [ -n "$hud_dir" ] && [ -f "$hud_dir/dist/index.js" ]; then
-      node -e '
-        const fs = require("fs"), [file, script] = process.argv.slice(1);
-        const settings = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
-        if (settings.statusLine && !String(settings.statusLine.command || "").includes("claude-hud")) process.exit(0);
-        const command = "cols=$(stty size </dev/tty 2>/dev/null | awk '"'"'{print $2}'"'"'); " +
-          "export COLUMNS=$(( ${cols:-120} > 4 ? ${cols:-120} - 4 : 1 )); exec node \"" + script + "\"";
-        settings.statusLine = { type: "command", command };
-        fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");' "$claude_home/settings.json" "$hud_dir/dist/index.js"
+    # Point the status line at claude-hud with its own setup script, as /claude-hud:setup does, unless settings.json
+    # already has a status line of your own. The launcher it installs runs the newest installed claude-hud.
+    setups=("$claude_home"/plugins/cache/claude-hud/claude-hud/*/scripts/setup.mjs)
+    if [ -e "${setups[0]}" ]; then
+      setup="$(printf '%s\n' "${setups[@]}" | sort -V | tail -1)"
+      # Skip an install that changes nothing, since each one leaves a settings.json backup behind.
+      todo="$(node "$setup" inspect --shell posix | node -e '
+        const fs = require("fs"), r = JSON.parse(fs.readFileSync(0, "utf8"));
+        const s = fs.existsSync(r.settingsPath) ? JSON.parse(fs.readFileSync(r.settingsPath, "utf8") || "{}") : {};
+        console.log(r.existing === "other" ? "keep" : s.statusLine?.command === r.command ? "same" : "install")')"
+      if [ "$todo" = same ] && ! cmp -s "$(dirname "$setup")/statusline.mjs" "$claude_home/plugins/claude-hud/statusline.mjs"; then
+        todo=install
+      fi
+      if [ "$todo" = install ]; then node "$setup" install --shell posix >/dev/null; fi
+    else
+      echo "skip claude-hud status line: claude-hud not installed" >&2
     fi
   else
     echo "skip Claude plugins: claude not on PATH" >&2
