@@ -1,6 +1,6 @@
 name: Update skills
 
-# Opens a PR when a source in sources.txt has a new release. Nothing reaches cloud sessions until it's merged.
+# Opens a PR when a source in sources.txt or a package in pi-packages.txt has a new release. Nothing reaches cloud sessions until it's merged.
 on:
   schedule:
     - cron: '0 20 * * *'
@@ -24,10 +24,10 @@ jobs:
         id: bump
         run: |
           scripts/bump-sources.sh | tee "$RUNNER_TEMP/changes.txt"
-          if git diff --quiet sources.txt; then
-            echo "All sources on their latest release"; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          if git diff --quiet sources.txt pi-packages.txt; then
+            echo "All sources and packages on their latest release"; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          branch="update-skills/$(sha256sum sources.txt | cut -c1-12)"
+          branch="update-skills/$(cat sources.txt pi-packages.txt | sha256sum | cut -c1-12)"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
             echo "PR branch $branch already exists"; echo "skip=true" >> "$GITHUB_OUTPUT"

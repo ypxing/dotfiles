@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Moves each pinned GitHub source in sources.txt to its latest release tag. Needs gh.
+# Moves each pinned GitHub source in sources.txt to its latest release tag, and each Pi package in
+# pi-packages.txt to its latest npm version. Needs gh and npm.
 set -euo pipefail
 
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,3 +22,18 @@ while IFS= read -r line; do
 done < "$DOTFILES/sources.txt"
 
 cat "$out" > "$DOTFILES/sources.txt"
+: > "$out"
+
+while IFS= read -r line; do
+  if [[ "$line" =~ ^npm:(@?[^@[:space:]]+)@([^[:space:]]+)$ ]]; then
+    name="${BASH_REMATCH[1]}" version="${BASH_REMATCH[2]}"
+    latest="$(npm view "$name" version)"
+    if [ "$latest" != "$version" ]; then
+      echo "$name: $version -> $latest"
+      line="npm:$name@$latest"
+    fi
+  fi
+  printf '%s\n' "$line" >> "$out"
+done < "$DOTFILES/pi-packages.txt"
+
+cat "$out" > "$DOTFILES/pi-packages.txt"

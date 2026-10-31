@@ -1,0 +1,4 @@
+# Pi packages (installed when the pi agent is selected and `pi` is on PATH), one per line: npm:<name>@<version>
+# Pinned versions are skipped by `pi update`; the Update skills workflow bumps them to the latest release.
+npm:pi-web-access@0.46.0
+npm:pi-subagents@0.84.0

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Installs the skills from sources.txt and skills/ with npx skills, user level. Safe to re-run.
+# Installs the skills from sources.txt and skills/ with npx skills, user level, plus pi-packages.txt
+# for pi and claude-plugins.txt for claude-code. Safe to re-run.
 # Usage: ./install.sh [agent...]   (default: every agent in DEFAULT_AGENTS; names as in `npx skills add -a`)
 # Cloud agents: call this from the environment's setup script (see README).
 set -euo pipefail
@@ -11,8 +12,9 @@ export DISABLE_TELEMETRY=1
 
 command -v npx >/dev/null || { echo "install.sh needs Node.js (npx)" >&2; exit 1; }
 
+agents=" ${*:-$DEFAULT_AGENTS} "
 agent_flags=()
-for agent in ${*:-$DEFAULT_AGENTS}; do agent_flags+=(-a "$agent"); done
+for agent in $agents; do agent_flags+=(-a "$agent"); done
 
 add() { npx -y "$SKILLS_CLI" add "$@" -g "${agent_flags[@]}" --copy -y </dev/null; }
 
@@ -25,4 +27,28 @@ done < "$DOTFILES/sources.txt"
 # Personal skills go last, so they win a name clash with a source.
 if compgen -G "$DOTFILES/skills/*/SKILL.md" >/dev/null; then
   add "$DOTFILES/skills" --skill '*'
+fi
+
+# Reads <file> without comments or blank lines.
+entries() { grep -v -e '^#' -e '^[[:space:]]*$' "$DOTFILES/$1"; }
+
+if [[ "$agents" == *" pi "* ]]; then
+  if command -v pi >/dev/null; then
+    entries pi-packages.txt | while read -r package _; do pi install "$package" </dev/null; done
+  else
+    echo "skip pi packages: pi not on PATH" >&2
+  fi
+fi
+
+if [[ "$agents" == *" claude-code "* ]]; then
+  if command -v claude >/dev/null; then
+    entries claude-plugins.txt | while read -r marketplace plugin _; do
+      claude plugin marketplace add "$marketplace" </dev/null
+      claude plugin marketplace update "${plugin#*@}" </dev/null
+      claude plugin install "$plugin" </dev/null
+      claude plugin update "$plugin" </dev/null
+    done
+  else
+    echo "skip Claude plugins: claude not on PATH" >&2
+  fi
 fi

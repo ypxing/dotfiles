@@ -1,0 +1,3 @@
+# Claude Code plugins (installed when claude-code is selected and `claude` is on PATH), one per line:
+# <marketplace source> <plugin>@<marketplace>. Not pinned: install.sh updates each to its latest version.
+jarrodwatts/claude-hud claude-hud@claude-hud
