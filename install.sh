@@ -18,19 +18,18 @@ for agent in $agents; do agent_flags+=(-a "$agent"); done
 
 add() { npx -y "$SKILLS_CLI" add "$@" -g "${agent_flags[@]}" --copy -y </dev/null; }
 
-while read -r source skills _; do
-  case "$source" in ''|'#'*) continue ;; esac
+# Reads <file> without comments or blank lines; tolerates a missing final newline and no entries.
+entries() { grep -v -e '^#' -e '^[[:space:]]*$' "$DOTFILES/$1" || true; }
+
+entries sources.txt | while read -r source skills _; do
   [[ "$source" == *'#'* ]] || echo "warning: $source has no #tag, installing its default branch" >&2
   if [ -n "$skills" ]; then add "$source" --skill ${skills//,/ }; else add "$source" --skill '*'; fi
-done < "$DOTFILES/sources.txt"
+done
 
 # Personal skills go last, so they win a name clash with a source.
 if compgen -G "$DOTFILES/skills/*/SKILL.md" >/dev/null; then
   add "$DOTFILES/skills" --skill '*'
 fi
-
-# Reads <file> without comments or blank lines.
-entries() { grep -v -e '^#' -e '^[[:space:]]*$' "$DOTFILES/$1"; }
 
 if [[ "$agents" == *" pi "* ]]; then
   if command -v pi >/dev/null; then

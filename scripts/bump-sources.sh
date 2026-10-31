@@ -9,7 +9,7 @@ trap 'rm -f "$out"' EXIT
 
 for file in sources.txt claude-plugins.txt; do
   : > "$out"
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     read -r source rest _ <<<"$line"
     if [[ "$source" =~ ^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(.+)$ ]]; then
       repo="${BASH_REMATCH[1]}" tag="${BASH_REMATCH[2]}"
@@ -27,10 +27,11 @@ for file in sources.txt claude-plugins.txt; do
 done
 : > "$out"
 
-while IFS= read -r line; do
+while IFS= read -r line || [ -n "$line" ]; do
   if [[ "$line" =~ ^npm:(@?[^@[:space:]]+)@([^[:space:]]+)$ ]]; then
     name="${BASH_REMATCH[1]}" version="${BASH_REMATCH[2]}"
-    latest="$(npm view "$name" version)"
+    latest="$(npm view "$name" version 2>/dev/null)" ||
+      { echo "warning: npm view $name failed, keeping $version" >&2; latest="$version"; }
     if [ "$latest" != "$version" ]; then
       echo "$name: $version -> $latest"
       line="npm:$name@$latest"
