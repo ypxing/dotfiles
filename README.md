@@ -42,11 +42,10 @@ created or resumed. Doesn't apply to sessions running on GitHub Actions. See
 
 ## Claude Code cloud (and other cloud agents with a setup script)
 
-The repo is private, so the environment needs a read-only token. Create a fine-grained PAT scoped to this repo only
-(Contents: read), store it as the env var `DOTFILES_TOKEN`, and add this to the environment's setup script:
+The repo is public, so no token is needed. Add this to the environment's setup script:
 
 ```bash
-git clone --depth 1 "https://x-access-token:${DOTFILES_TOKEN}@github.com/ypxing/dotfiles" ~/dotfiles && ~/dotfiles/install.sh claude-code
+git clone --depth 1 https://github.com/ypxing/dotfiles ~/dotfiles && ~/dotfiles/install.sh claude-code
 ```
 
 Use `codex`, `cursor` etc. instead of `claude-code` for other agents' cloud environments.
