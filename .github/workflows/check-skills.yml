@@ -1,0 +1,22 @@
+name: Check skills
+
+# Fails when .copilot/skills doesn't match sources.txt and skills/. Fix: scripts/build-copilot-skills.sh
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: scripts/build-copilot-skills.sh
+      - name: .copilot/skills is up to date
+        run: |
+          git add -A .copilot/skills
+          git diff --cached --stat --exit-code -- .copilot/skills || {
+            echo "::error::.copilot/skills is stale. Run scripts/build-copilot-skills.sh and commit."; exit 1; }
