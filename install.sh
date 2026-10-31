@@ -40,8 +40,10 @@ if [[ "$agents" == *" pi "* ]]; then
 fi
 
 if [[ "$agents" == *" claude-code "* ]]; then
+  claude_home="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
   if command -v claude >/dev/null; then
-    entries claude-plugins.txt | while read -r marketplace plugin _; do
+    entries claude-plugins.txt | while read -r marketplace plugin sha _; do
       name="${plugin#*@}" ref=""
       [[ "$marketplace" == *'#'* ]] && ref="${marketplace#*#}"
       # Re-adding a marketplace with a new #tag is a no-op, so a moved pin needs remove + add.
@@ -52,14 +54,36 @@ if [[ "$agents" == *" claude-code "* ]]; then
         claude plugin marketplace remove "$name" </dev/null
       fi
       claude plugin marketplace add "$marketplace" </dev/null
+      # A tag can be moved; the commit it resolves to must be the reviewed one.
+      if [ -n "$sha" ]; then
+        head="$(git -C "$claude_home/plugins/marketplaces/$name" rev-parse HEAD)"
+        if [ "$head" != "$sha" ]; then
+          echo "$marketplace resolved to $head, expected $sha" >&2
+          exit 1
+        fi
+      fi
       claude plugin install "$plugin" </dev/null
     done
+
+    # Point the status line at the installed claude-hud, as /claude-hud:setup would, unless it's set to something else.
+    hud_dir="$(ls -td "$claude_home"/plugins/cache/claude-hud/claude-hud/*/ 2>/dev/null | head -1)"
+    hud_dir="${hud_dir%/}"
+    if [ -n "$hud_dir" ] && [ -f "$hud_dir/dist/index.js" ]; then
+      node -e '
+        const fs = require("fs"), [file, script] = process.argv.slice(1);
+        const settings = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+        if (settings.statusLine && !String(settings.statusLine.command || "").includes("claude-hud")) process.exit(0);
+        const command = "cols=$(stty size </dev/tty 2>/dev/null | awk '"'"'{print $2}'"'"'); " +
+          "export COLUMNS=$(( ${cols:-120} > 4 ? ${cols:-120} - 4 : 1 )); exec node \"" + script + "\"";
+        settings.statusLine = { type: "command", command };
+        fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");' "$claude_home/settings.json" "$hud_dir/dist/index.js"
+    fi
   else
     echo "skip Claude plugins: claude not on PATH" >&2
   fi
 
   # claude-hud settings: the repo copy wins; a differing local file is kept as config.json.bak.
-  hud="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/claude-hud/config.json"
+  hud="$claude_home/plugins/claude-hud/config.json"
   if ! cmp -s "$DOTFILES/claude/claude-hud.json" "$hud"; then
     mkdir -p "$(dirname "$hud")"
     [ -f "$hud" ] && cp "$hud" "$hud.bak"
