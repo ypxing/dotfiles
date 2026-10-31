@@ -40,8 +40,10 @@ if [[ "$agents" == *" pi "* ]]; then
 fi
 
 if [[ "$agents" == *" claude-code "* ]]; then
+  claude_home="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
   if command -v claude >/dev/null; then
-    entries claude-plugins.txt | while read -r marketplace plugin _; do
+    entries claude-plugins.txt | while read -r marketplace plugin sha _; do
       name="${plugin#*@}" ref=""
       [[ "$marketplace" == *'#'* ]] && ref="${marketplace#*#}"
       # Re-adding a marketplace with a new #tag is a no-op, so a moved pin needs remove + add.
@@ -52,14 +54,41 @@ if [[ "$agents" == *" claude-code "* ]]; then
         claude plugin marketplace remove "$name" </dev/null
       fi
       claude plugin marketplace add "$marketplace" </dev/null
+      # A tag can be moved; the commit it resolves to must be the reviewed one.
+      if [ -n "$sha" ]; then
+        head="$(git -C "$claude_home/plugins/marketplaces/$name" rev-parse HEAD)"
+        if [ "$head" != "$sha" ]; then
+          echo "$marketplace resolved to $head, expected $sha; the tag may have moved upstream." >&2
+          echo "Review it, then update claude-plugins.txt, or run: claude plugin marketplace remove $name" >&2
+          exit 1
+        fi
+      fi
       claude plugin install "$plugin" </dev/null
     done
+
+    # Point the status line at claude-hud with its own setup script, as /claude-hud:setup does, unless settings.json
+    # already has a status line of your own. The launcher it installs runs the newest installed claude-hud.
+    setups=("$claude_home"/plugins/cache/claude-hud/claude-hud/*/scripts/setup.mjs)
+    if [ -e "${setups[0]}" ]; then
+      setup="$(printf '%s\n' "${setups[@]}" | sort -V | tail -1)"
+      # Skip an install that changes nothing, since each one leaves a settings.json backup behind.
+      todo="$(node "$setup" inspect --shell posix | node -e '
+        const fs = require("fs"), r = JSON.parse(fs.readFileSync(0, "utf8"));
+        const s = fs.existsSync(r.settingsPath) ? JSON.parse(fs.readFileSync(r.settingsPath, "utf8") || "{}") : {};
+        console.log(r.existing === "other" ? "keep" : s.statusLine?.command === r.command ? "same" : "install")')"
+      if [ "$todo" = same ] && ! cmp -s "$(dirname "$setup")/statusline.mjs" "$claude_home/plugins/claude-hud/statusline.mjs"; then
+        todo=install
+      fi
+      if [ "$todo" = install ]; then node "$setup" install --shell posix >/dev/null; fi
+    else
+      echo "skip claude-hud status line: claude-hud not installed" >&2
+    fi
   else
     echo "skip Claude plugins: claude not on PATH" >&2
   fi
 
   # claude-hud settings: the repo copy wins; a differing local file is kept as config.json.bak.
-  hud="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/claude-hud/config.json"
+  hud="$claude_home/plugins/claude-hud/config.json"
   if ! cmp -s "$DOTFILES/claude/claude-hud.json" "$hud"; then
     mkdir -p "$(dirname "$hud")"
     [ -f "$hud" ] && cp "$hud" "$hud.bak"

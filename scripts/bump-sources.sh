@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Moves each pinned GitHub repo in sources.txt and claude-plugins.txt to its latest release tag, and each Pi package in
-# pi-packages.txt to its latest npm version. Needs gh and npm.
+# Moves each pinned GitHub repo in sources.txt and claude-plugins.txt to its latest release tag (and, for a plugin, the
+# commit sha it resolves to), and each Pi package in pi-packages.txt to its latest npm version. Needs gh and npm.
 set -euo pipefail
 
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,7 +17,13 @@ for file in sources.txt claude-plugins.txt; do
         { echo "warning: $repo has no release, keeping #$tag" >&2; latest="$tag"; }
       if [ "$latest" != "$tag" ]; then
         echo "$repo: $tag -> $latest"
-        line="$repo#$latest${rest:+ $rest}"
+        if [ "$file" = claude-plugins.txt ]; then
+          # A plugin line also pins the commit its tag resolves to.
+          sha="$(gh api "repos/$repo/commits/$latest" --jq .sha)"
+          line="$repo#$latest $rest $sha"
+        else
+          line="$repo#$latest${rest:+ $rest}"
+        fi
       fi
     fi
     printf '%s\n' "$line" >> "$out"
