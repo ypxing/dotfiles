@@ -27,9 +27,9 @@ This skill does not commit or push: it prints the command, and the user runs it.
 <!-- fragment:missing-library -->
 **Shared scripts.** The scripts this skill runs live in the `coding-crew-lib` skill, installed beside it at
 `<skill-dir>/../coding-crew-lib` (`<skill-dir>` being the directory you read this file from). Before the first
-command that runs one, check that directory exists. If it does not, stop and tell the user to install it at this
-skill's scope, `npx skills add ypxing/coding-crew -s coding-crew-lib` (adding `-g` when this skill is installed at
-user level), or to re-run coding-crew's `install.sh`.
+command that runs one, check that directory exists. If it does not, stop and tell the user to install it from the
+source and at the scope they installed this skill from (`npx skills add <that source> -s coding-crew-lib`, adding
+`-g` when this skill is installed at user level), or to re-run coding-crew's `install.sh`.
 <!-- /fragment:missing-library -->
 
 <!-- fragment:tracker-configuration -->
@@ -95,6 +95,9 @@ then, from the main checkout:
 bash "<skill-dir>/../coding-crew-lib/scripts/checks/run-checks.sh" --project-root "$PWD"
 ```
 
+On every run, pass or fail, its `<key>: rewrote: <files>` lines are a check that fixed those files (a
+`lint --fix`): name them to the user, and carry every file any run named to Step 4's commit line.
+
 - `CHECKS: pass`: say so, and go on.
 - `CHECKS: fail`: show each failing check's output, then ask the user, per failing check: **fix** the command
   (edit it in `$DEV` with them, then run `run-checks.sh` again), **keep** it as it is (Step 4 labels it
@@ -108,13 +111,20 @@ issues are not in the runner's checkout".
 
 The workflow a repo gets is a short caller, `<skill-dir>/hosts/github-actions.yml`: its triggers, permissions and
 the secrets it passes, and one job that runs coding-crew's reusable workflow
-`ypxing/coding-crew/.github/workflows/crew-solve-feature.yml` at the release tag on its `uses:` line. The runner
-installs that release's skills, so the repo variable `CODING_CREW_REF` is no longer read.
+`ypxing/coding-crew/.github/workflows/crew-solve-feature.yml` at the release tag on its `uses:` line. The repo gets
+it pinned to that tag's commit SHA, the tag kept as a trailing comment (`@<sha>  # vX.Y.Z`): a tag can be moved, and
+the job holds the repo's write token and the user's secrets. The runner installs that release's skills, so the repo
+variable `CODING_CREW_REF` is no longer read.
+
+The check below needs no network: a caller is `identical` when it is SHA-pinned and, with the pin read back as
+its tag, matches the template; a tag-pinned one `differs`, so it is offered the pin:
 
 ```bash
 WF=.github/workflows/solve-feature.yml
+PIN='^( *uses: ypxing/coding-crew/\.github/workflows/crew-solve-feature\.yml@)[0-9a-f]{40}  # ([^ ]+)$'
 if [ ! -f "$WF" ]; then echo absent
-elif cmp -s "<skill-dir>/hosts/github-actions.yml" "$WF"; then echo identical
+elif grep -qE "$PIN" "$WF" && sed -E "s%$PIN%\\1\\2%" "$WF" | cmp -s "<skill-dir>/hosts/github-actions.yml" -; then
+  echo identical
 else echo differs; fi
 ```
 
@@ -125,7 +135,8 @@ else echo differs; fi
   on. On any other run, ask nothing: show "Actions workflow: not installed (`/setup-coding-crew redo actions` adds
   it)" and move on.
 - `differs`: show `diff -u "$WF" "<skill-dir>/hosts/github-actions.yml"` and ask whether to replace the file
-  with the template. Overwrite only on yes; on no, move on.
+  with the template, its `uses:` ref pinned to the release's commit SHA (the diff shows the tag there; when the diff
+  is empty, that pin is the only change). Overwrite only on yes; on no, move on.
 
 On yes, ask which agent CLI the runner uses, and keep the answer as `<agent>`:
 
@@ -135,23 +146,29 @@ On yes, ask which agent CLI the runner uses, and keep the answer as `<agent>`:
   on AWS Bedrock with no secret, through repo variables and an IAM role coding-crew's `docs/guide.md` describes.
 
 The caller's tag must be released (coding-crew installs from `main`, which can be ahead of its last release), so
-the block checks it before writing anything:
+the block resolves it to its commit SHA before writing anything, and writes the template with only that `uses:` ref
+replaced:
 
 ```bash
-TAG=$(sed -nE 's#^ *uses: ypxing/coding-crew/\.github/workflows/crew-solve-feature\.yml@([^ ]+)$#\1#p' "<skill-dir>/hosts/github-actions.yml")
-if ! ERR=$(gh api "repos/ypxing/coding-crew/git/ref/tags/$TAG" 2>&1 >/dev/null); then
-  if grep -q 'HTTP 404' <<<"$ERR"; then
+TPL="<skill-dir>/hosts/github-actions.yml"
+TAG=$(sed -nE 's#^ *uses: ypxing/coding-crew/\.github/workflows/crew-solve-feature\.yml@([^ ]+)$#\1#p' "$TPL")
+ERR=$(mktemp)
+if ! OUT=$(gh api "repos/ypxing/coding-crew/commits/$TAG" --jq .sha 2>"$ERR") || ! grep -qxE '[0-9a-f]{40}' <<<"$OUT"; then
+  if grep -q 'HTTP 422' "$ERR"; then
     echo "coding-crew's workflow tag $TAG is not released yet: re-run after the release, or install from a release tag"
-  else echo "$ERR"; fi
+  elif [ -s "$ERR" ]; then cat "$ERR"
+  else echo "$OUT"; fi
 else
   mkdir -p .github/workflows
-  cp "<skill-dir>/hosts/github-actions.yml" .github/workflows/solve-feature.yml
+  sed -E "s|^( *uses: ypxing/coding-crew/\.github/workflows/crew-solve-feature\.yml@)[^ ]+\$|\1$OUT  # $TAG|" "$TPL" \
+    > .github/workflows/solve-feature.yml
   gh label create run-agent --force
   gh variable set CREW_AGENT --body <agent>
 fi
+rm -f "$ERR"
 ```
 
-When it prints the not-released line or the tag check's error, nothing was written: say so and go to Step 4.
+When it prints the not-released line or the SHA lookup's error, nothing was written: say so and go to Step 4.
 
 Once it wrote the caller, check the default branch: the workflow's token has `contents: write`, so on a branch with
 no protection and no ruleset requiring a PR it can push there directly. Both reads need only read access; a failed
@@ -197,8 +214,10 @@ for the runs, and say how a run starts: label any issue of a feature `run-agent`
 the slug; and that a finished `ready-for-human` issue of a `run-agent` feature re-runs it. Tell them too that an issue whose change touches `.github/workflows/` cannot land from a runner — the
 workflow's `GITHUB_TOKEN` never gets the `workflows` scope — so such an issue is run locally, for example with
 `/solve-feature`; a run that hits one keeps its unpushed commits in the artifact's `unpushed.bundle`, and its
-summary page prints the commands that fetch them. Last, tell them the file names a coding-crew release: to update, they bump the
-tag on its `uses:` line (Dependabot's `github-actions` ecosystem opens those PRs), and its checks show on a PR as
+summary page prints the commands that fetch them. Last, tell them the file pins a coding-crew release by commit SHA: to update, they take
+Dependabot's `github-actions` PR (it bumps the SHA and its version comment together), or update the installed
+coding-crew skills to the new release (re-run `install.sh`, or the `npx skills add` command you installed with) and then run
+`/setup-coding-crew redo actions`. The file's checks show on a PR as
 `run / <job>`, so a branch rule that requires the old `solve` check needs the new name. An organisation that allows
 only its own actions runs an internal copy of coding-crew instead: a mirror whose `stable` branch carries one
 commit pointing the install line at the copy, which the callers name; coding-crew's `docs/guide.md` (solve-feature
@@ -210,14 +229,19 @@ Always, even after a step failed or was skipped, except after a stop in Step 2. 
 before they are committed; committing them shares them with the team and with an Actions runner, whose fresh
 checkout has only what is committed. List every setup file git shows as changed or untracked in the main
 checkout, whether or not this run wrote it. Set `START` to the top level you were started in, and `UNVERIFIED` to
-the checks the user kept failing in Step 2, space-separated (empty when none):
+the checks the user kept failing in Step 2, space-separated, and `REWROTE` to the files Step 2's `rewrote:` lines
+named, one quoted array item per file (both empty when none):
 
 ```bash
 START="<the top level setup was started in>"
 UNVERIFIED=""
+REWROTE=()
 MAIN=$(git rev-parse --path-format=absolute --git-common-dir)
 [ "$(basename "$MAIN")" = .git ] && MAIN=$(dirname "$MAIN") || MAIN=$(git rev-parse --show-toplevel)
-FILES=$(git -C "$MAIN" status --porcelain --untracked-files=all -- .coding-crew/config.json .coding-crew/dev-commands.json .github/workflows/solve-feature.yml | cut -c4- | LC_ALL=C sort | paste -sd' ' -)
+changed() { git -C "$MAIN" status --porcelain -z --no-renames --untracked-files=all -- "$@" |
+  while IFS= read -r -d '' e; do printf '%s\0' "${e:3}"; done | LC_ALL=C sort -z; }
+FILES=""
+while IFS= read -r -d '' f; do FILES+="${FILES:+ }$(printf '%q' "$f")"; done < <(changed .coding-crew/config.json .coding-crew/dev-commands.json .github/workflows/solve-feature.yml "${REWROTE[@]}")
 for c in $UNVERIFIED; do echo "unverified: $c fails"; done
 CD=""; [ "$MAIN" = "$START" ] || CD="cd $(printf '%q' "$MAIN") && "
 if [ -n "$FILES" ]; then echo "To finish, run: ${CD}git add $FILES && git commit -m \"Set up coding-crew\""

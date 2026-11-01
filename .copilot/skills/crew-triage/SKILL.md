@@ -16,9 +16,9 @@ One issue that belongs to no feature yet goes in. Out comes either the draft PR 
 <!-- fragment:missing-library -->
 **Shared scripts.** The scripts this skill runs live in the `coding-crew-lib` skill, installed beside it at
 `<skill-dir>/../coding-crew-lib` (`<skill-dir>` being the directory you read this file from). Before the first
-command that runs one, check that directory exists. If it does not, stop and tell the user to install it at this
-skill's scope, `npx skills add ypxing/coding-crew -s coding-crew-lib` (adding `-g` when this skill is installed at
-user level), or to re-run coding-crew's `install.sh`.
+command that runs one, check that directory exists. If it does not, stop and tell the user to install it from the
+source and at the scope they installed this skill from (`npx skills add <that source> -s coding-crew-lib`, adding
+`-g` when this skill is installed at user level), or to re-run coding-crew's `install.sh`.
 <!-- /fragment:missing-library -->
 
 <!-- fragment:tracker-configuration -->
@@ -58,7 +58,7 @@ before anything can be built is an open question: no issue could be built until 
 
 <!-- fragment:light-path-checks -->
 1. **Problem** — the source states the problem with its cost or evidence.
-2. **One slice** — one vertical slice looks likely.
+2. **One slice** — one vertical slice in one repo looks likely; a plan that changes more than one repo is not one slice.
 3. **Criteria** — acceptance criteria are testable, or derivable from the code.
 4. **No fork** — no open fork in the "annoyed" lane remains: a decision the user would be annoyed to learn you made without asking — schema, migrations or data model; auth, permissions or PII; anything that costs money or moves scope; user-visible behaviour; breaking an external contract already shipped; conflicting in-repo precedent.
 <!-- /fragment:light-path-checks -->
