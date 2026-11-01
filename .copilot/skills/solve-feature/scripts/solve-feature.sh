@@ -50,8 +50,9 @@ MAIN_ROOT=$(git rev-parse --path-format=absolute --git-common-dir)
 [ "$(basename "$MAIN_ROOT")" = .git ] && MAIN_ROOT=$(dirname "$MAIN_ROOT") || MAIN_ROOT="$ROOT"
 # The setup files a user commits once satisfied: no tree check counts them, and no run commits them. A dev commands
 # file this tree tracks is not one: it is the branch's own copy, the one its checks read, counted and committed.
-BRANCH_WORK=(. ':!.coding-crew/config.json')
-git ls-files --error-unmatch -- .coding-crew/dev-commands.json >/dev/null 2>&1 || BRANCH_WORK+=(':!.coding-crew/dev-commands.json')
+BRANCH_WORK=(. ':!.coding-crew/config.json') SETUP_FILES=(.coding-crew/config.json)
+git ls-files --error-unmatch -- .coding-crew/dev-commands.json >/dev/null 2>&1 ||
+  { BRANCH_WORK+=(':!.coding-crew/dev-commands.json'); SETUP_FILES+=(.coding-crew/dev-commands.json); }
 [ "$CMD" != start ] || rm -f "$LOGS/outcome" "$LOGS"/pr-*.unfixed.md "$LOGS"/pr-*.review.json "$LOGS"/pr-*.summary.md "$LOGS"/pr-*.attention.md "$LOGS"/pr-*.head \
   "$LOGS"/pr-*.discarded.md "$LOGS"/pr-*.notes.md "$LOGS/review.base"
 # solveFeature.publish: false keeps the run on this machine: no push, no PR, the body in local_body's file. Read from
@@ -60,9 +61,11 @@ PUBLISH=yes
 [ "$(jq -r '.solveFeature.publish' "$HOME/.coding-crew/config.json" 2>/dev/null || true)" != false ] || PUBLISH=no
 # Keyed by branch as `gh pr view "$BRANCH"` is; not pr-body.md, land's draft body in publish mode.
 local_body() { echo "$LOGS/local-pr-${BRANCH//\//_}.md"; }
+# The issue next handed out for this feature until its land records it: per feature, as runs share this directory.
+landing() { echo "$LOGS/landing-$SLUG"; }
 # The tracker and checks libraries, in the coding-crew-lib skill installed beside this one.
 CLI="$SELF/../../coding-crew-lib/scripts/tracker/cli.mjs" CHECKS="$SELF/../../coding-crew-lib/scripts/checks"
-[ -f "$CLI" ] || die "tracker CLI not found ($CLI): install the coding-crew-lib skill beside solve-feature (npx skills add ypxing/coding-crew -s coding-crew-lib, adding -g at user level) or re-run install.sh"
+[ -f "$CLI" ] || die "tracker CLI not found ($CLI): install the coding-crew-lib skill beside solve-feature, from the source you installed solve-feature from (npx skills add <that source> -s coding-crew-lib, adding -g at user level) or re-run install.sh"
 
 # push <git push args> — `git push -q`; on failure sets PUSH_WHY to git's reason and returns 1. git's stderr still
 # reaches the terminal. The reason: a rejected ref's parenthesised one (GitHub's workflow-permission refusal arrives
@@ -114,16 +117,17 @@ pr_view() { # sets PR_N and PR_IS_DRAFT (true|false) when the branch has an OPEN
 # pr_body_read <pr> / pr_body_write <pr> <file> [<title>] — the PR body's one store: the PR on GitHub, or with
 # PUBLISH=no the branch's local body file, whose first line is `# <title>` so its reader has both.
 pr_body_read() {
-  # A body a person edited in the web UI comes back with CRLF line endings, which no marker match would see.
+  # A body a person edited, in the web UI or the local file, can come back with CRLF line endings, which no marker
+  # match would see.
   if [ "$PUBLISH" = yes ]; then gh pr view "$1" --json body | jq -r '.body' | tr -d '\r'
-  else tail -n +2 "$(local_body)" | sed '1{/^$/d;}'
+  else tail -n +2 "$(local_body)" | tr -d '\r' | sed '1{/^$/d;}'
   fi
 }
 pr_body_write() {
   local f t="${3:-}"
   if [ "$PUBLISH" = yes ]; then gh pr edit "$1" ${t:+--title "$t"} --body-file "$2" >/dev/null; return; fi
   f=$(local_body)
-  [ -n "$t" ] || [ ! -f "$f" ] || t=$(sed -n '1s/^# //p' "$f")
+  [ -n "$t" ] || [ ! -f "$f" ] || t=$(sed -n '1s/^# //p' "$f" | tr -d '\r')
   { printf '# %s\n\n' "$t"; cat "$2"; } >"$f.tmp" && mv "$f.tmp" "$f"
 }
 
@@ -212,12 +216,32 @@ nothing_left() { # exit 3; with no open PR on the branch, the run has nothing to
 next() {
   local rc=0 ref
   ref=$(node "$CLI" next --feature-slug "$SLUG") || rc=$?
-  case $rc in 0) ;; 3) nothing_left ;; *) die "next failed for '$SLUG' (exit $rc, see above)" ;; esac
+  case $rc in 0|3) ;; *) die "next failed for '$SLUG' (exit $rc, see above)" ;; esac
+  # The issue handed out last, cleared once its land records it. Done in the tracker but still named here, it was
+  # closed with no land to gate or record it, and the run would skip it as landed.
+  local on
+  if [ -s "$(landing)" ] && IFS=$'\t' read -r REF on <"$(landing)" && { [ "$rc" = 3 ] || [ "$ref" != "$REF" ]; }; then
+    # Landed on the branch its coder committed to: a re-run on another branch would gate a tree without the work.
+    on=${on:-$(git branch --show-current)}
+    local st src=0 cmds why="$REF is done but its land never finished" todo="land $SLUG $REF $on" go="" rerun="re-run"
+    [ "$on" = "$(git branch --show-current)" ] || go="check out $on and " rerun="re-run with --branch $on"
+    st=$(node "$CLI" status "$REF") || src=$?
+    # Exit 3: the issue is gone (deleted, its file renamed), so there is nothing left to land for it.
+    case $src in 0) ;; 3) rm -f "$(landing)" ;; *) die "status $REF failed (see above)" ;; esac
+    if [ "$st" = done ]; then
+      # shellcheck source=/dev/null
+      . "$CHECKS/commands-file.sh" 2>/dev/null && cmds=$(commands_file "$ROOT") && ! commands_field_present "$cmds" test &&
+        why="$why and no check commands are known" todo="/setup-coding-crew, then $todo"
+      stop land "$why: if its coder finished it, ${go}run $todo; otherwise reopen $REF; then $rerun"
+    fi
+  fi
+  [ "$rc" = 0 ] || nothing_left
   # Saved now, not in land: the local tracker's close moves the file, and fetch then exits 3. fetch runs the
   # backend's validateRef, so a ref it rejects stops here, before it reaches the coder's prompt.
   node "$CLI" fetch "$ref" >"$LOGS/${ref//\//_}.issue.md" || die "fetch $ref failed (see above)"
   # One coder at a time writes its report here; an earlier one's would read as this coder's at land's solve stop.
   rm -f "$LOGS/coder.report.md" "$LOGS/coder.notes.md"
+  printf '%s\t%s\n' "$ref" "$(git branch --show-current)" >"$(landing)"
   echo "$ref"
 }
 
@@ -263,7 +287,7 @@ pr_title() { # <ref-slug> — the PRD's title when the CLI's note heads the spec
   [ -n "$t" ] || t=$(grep -m1 '^# ' "$LOGS/$1.issue.md" | sed 's/^# //')
   printf '%s' "$t"
 }
-checks_lib() { [ -f "$CHECKS/run-checks.sh" ] || die "checks library not found ($CHECKS): install the coding-crew-lib skill beside solve-feature (npx skills add ypxing/coding-crew -s coding-crew-lib, adding -g at user level) or re-run install.sh"; }
+checks_lib() { [ -f "$CHECKS/run-checks.sh" ] || die "checks library not found ($CHECKS): install the coding-crew-lib skill beside solve-feature, from the source you installed solve-feature from (npx skills add <that source> -s coding-crew-lib, adding -g at user level) or re-run install.sh"; }
 
 # reopen_ref <step> <reason> <commit message> <recovery when reopen fails> [<log>] — make the closed $REF ready
 # again, so a plain re-run's coder takes it up instead of the tracker counting it landed; a failure stops at <step>.
@@ -301,6 +325,14 @@ pr_create_failed() {
   stop pr "$why; $REF is ready again with its work pushed to $BRANCH: $redo"
 }
 
+# commit_rewrites — after a passing run-checks.sh on a tree clean outside SETUP_FILES, what is left is exactly the
+# checks' rewrites (a `lint --fix`): one commit of its own. Tracked files only, as run-checks.sh fails a check that
+# creates one. Staged over `.`, then unstaged: git add refuses any pathspec naming an ignored path, an exclude too.
+commit_rewrites() {
+  git add -u -- . && git reset -q -- "${SETUP_FILES[@]}" || return 1
+  git diff --cached --quiet || git commit -q -m "Apply the checks' rewrites"
+}
+
 # land — the coder left <branch> clean with <ref> closed: merge in origin's branch, gate with the checks, push,
 # open the draft PR if there is none; prints pr=<n>.
 land() {
@@ -308,7 +340,6 @@ land() {
   [ -f "$LOGS/$rs.issue.md" ] || die "no saved issue for $REF: run next first"
   checks_lib
   [ "$(git branch --show-current)" = "$BRANCH" ] || stop solve "branch changed to '$(git branch --show-current)'"
-  # solve-issue's blocked leaves files a check rewrote for a human to commit, and its report says so.
   [ -z "$(git status --porcelain -- "${BRANCH_WORK[@]}")" ] || stop solve "working tree left dirty$([ ! -s "$LOGS/coder.report.md" ] || echo "; why: $LOGS/coder.report.md")"
   # solve-issue's close moves the issue out of `next`; still first means it stopped short (partial, blocked).
   again=$(node "$CLI" next --feature-slug "$SLUG") || rc=$?
@@ -331,6 +362,7 @@ land() {
   rc=0; bash "$CHECKS/run-checks.sh" --project-root "$ROOT" >"$clog" 2>&1 || rc=$?
   [ "$rc" != 3 ] || hand_back "no check commands known (DISCOVER): the coder discovered none" "run /setup-coding-crew, then re-run" "$clog"
   [ "$rc" = 0 ] || hand_back "run-checks.sh exit $rc" "fix the cause, then re-run" "$clog"
+  commit_rewrites || hand_back "committing the checks' rewrites failed (see above)" "commit them, then re-run" "$clog"
   # Any failed push reopens the issue, unretried: an Actions runner's commits go with its job, so a closed issue
   # would count as landed work that exists nowhere. Here a re-run finds the commits, since start never resets a branch.
   if [ "$PUBLISH" = yes ] && ! push -u origin "$BRANCH"; then
@@ -346,7 +378,12 @@ land() {
     printf '%s\n' "$BEGIN" "Implemented by solve-feature (\`$SLUG\`) — in progress." "<!-- solve-feature:slug $SLUG -->" "$END" >"$f"
   fi
   if [ -z "$PR_N" ] && [ "$PUBLISH" = no ]; then
-    pr_body_write local "$f" "$(pr_title "$rs")" || die "cannot write $(local_body)"
+    # Reopened like a failed gh pr create: the issue is closed, so a re-run would skip it and never open the body.
+    if ! pr_body_write local "$f" "$(pr_title "$rs")"; then
+      local why="cannot write $(local_body)"
+      reopen_ref pr "$why" "Reopen $REF: writing its local PR body failed" "reopen $REF by hand, then fix the cause and re-run"
+      stop pr "$why; $REF is ready again with its work committed on $BRANCH: fix the cause, then re-run"
+    fi
     PR_N=local
   elif [ -z "$PR_N" ]; then
     rc=0; url=$(gh pr create --draft --title "$(pr_title "$rs")" --body-file "$f" 2>"$LOGS/pr-create.err") || rc=$?
@@ -354,6 +391,8 @@ land() {
     [ "$rc" = 0 ] || pr_create_failed
     PR_N="${url##*/}"; [[ "$PR_N" =~ ^[0-9]+$ ]] || die "gh pr create printed no PR URL: $url"
   fi
+  # Pushed and on a PR, the issue has landed; a notes stop after this says how to add them by hand.
+  rm -f "$(landing)"
   post_notes "$PR_N" "$LOGS/coder.notes.md" "the coder of $REF · $(date +%F)"
   echo "pr=$PR_N"
 }
@@ -404,6 +443,7 @@ sync() {
     bash "$CHECKS/run-checks.sh" --project-root "$ROOT" >"$clog" 2>&1 || rc=$?
     [ "$rc" != 3 ] || die "no check commands known (DISCOVER): run /setup-coding-crew, then re-run"
     [ "$rc" = 0 ] || die "run-checks.sh exit $rc on $BRANCH merged with origin/$default — log: $clog; once fixed and committed, re-run"
+    commit_rewrites || die "committing the checks' rewrites failed (see above): commit them, then re-run"
     [ "$PUBLISH" = no ] || push -u origin "$BRANCH" || die "git push failed: $PUSH_WHY; once it can push, or once you have pushed it, re-run"
   fi
   git rev-parse HEAD >"$LOGS/review.base"
@@ -459,8 +499,10 @@ fix() {
   total=$(jq '.findings // [] | length' "$report")
   # crew-review's own severity field; a missing or unknown one is not severe.
   severe=$(jq '[.findings // [] | .[]? | select(.severity? | IN("CRITICAL", "HIGH", "MEDIUM"))] | length' "$report")
-  # Committed before the checks, so run-checks.sh's modified-files test also sees a check rewrite a file the fixer changed.
-  git add -A -- "${BRANCH_WORK[@]}"
+  # Committed before the checks, so what they leave is their own rewrites, committed apart.
+  # Listed by ls-files, not passed to git add: git add exits 1 on any pathspec naming an ignored path, an exclude too.
+  git ls-files -z -m -o --exclude-standard -- "${BRANCH_WORK[@]}" | xargs -0 -r git add -A -- ||
+    stop fix "git add failed (see above): stage and commit the fixer's edits by hand, then run fix $SLUG $PR $BRANCH, then describe $SLUG $PR"
   git diff --cached --quiet || git commit -q -m "Fix the review's findings$([ "$PUBLISH" = no ] || echo " on PR #$PR")"
   # A failed fetch skips the merge: the push owns that failure.
   if fetch_branch && ! merge_in "origin/$BRANCH"; then
@@ -471,13 +513,15 @@ fix() {
   bash "$CHECKS/run-checks.sh" --project-root "$ROOT" >"$clog" 2>&1 || rc=$?
   [ "$rc" != 3 ] || stop fix "no check commands known (DISCOVER): run /setup-coding-crew, then re-run" "$clog"
   [ "$rc" = 0 ] || stop fix "run-checks.sh exit $rc; once fixed and committed, run fix $SLUG $PR $BRANCH, then describe $SLUG $PR" "$clog"
+  commit_rewrites || stop fix "committing the checks' rewrites failed (see above): commit them, then run fix $SLUG $PR $BRANCH, then describe $SLUG $PR" "$clog"
   [ "$PUBLISH" = no ] || push -u origin "$BRANCH" || stop fix "git push failed: $PUSH_WHY; once it can push, or once you have pushed it, run fix $SLUG $PR $BRANCH, then describe $SLUG $PR"
   git rev-parse HEAD >"$LOGS/review.base"
   post_notes "$PR" "$LOGS/pr-$PR.notes.md" "the fixer of $pr_name's review · $(date +%F)"
 
   # "Changed nothing" is no commit on the branch's own line past the round's head: what merge_in brought in sits
-  # behind a merge's second parent, and a fix committed here and pushed by hand still counts.
-  [ -z "$(git rev-list --first-parent --no-merges -n1 HEAD "^$head_oid")" ] || moved=yes
+  # behind a merge's second parent, and a fix committed here and pushed by hand still counts. The checks' rewrites are
+  # not the fixer's.
+  [ -z "$(git rev-list --first-parent --no-merges --invert-grep --grep="^Apply the checks' rewrites\$" -n1 HEAD "^$head_oid")" ] || moved=yes
   # Needs a person: the reviewer's gaps, an unmet spec, each line the fixer left in unfixed.md, and a fixer that
   # changed nothing without saying why (it crashed or gave up).
   attention=$(jq -r '.gaps // [] | .[] | tostring' "$report")
@@ -532,7 +576,8 @@ describe() {
   local notes
   notes=$(pr_body_read "$PR") || die "reading PR $PR's body failed"
   notes=$(sed -n "\|^$NOTES_BEGIN\$|,\|^$NOTES_END\$|p" <<<"$notes")
-  grep -vxE "$NOTES_BEGIN|$NOTES_END|## Notes for a person|Delete a note here once it is handled\.|[[:space:]]*" <<<"$notes" | grep -q . || notes=""
+  # Not piped into grep -q: its early exit could fail the first grep under pipefail and drop the notes.
+  [ -n "$(grep -vxE "$NOTES_BEGIN|$NOTES_END|## Notes for a person|Delete a note here once it is handled\.|[[:space:]]*" <<<"$notes" || true)" ] || notes=""
   {
     echo "$BEGIN"
     # Written here, not by the writer subagent, so a reviewer always sees that agents wrote this PR.

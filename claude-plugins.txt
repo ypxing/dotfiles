@@ -1,4 +1,4 @@
 # Claude Code plugins (installed when claude-code is selected and `claude` is on PATH), one per line:
 # <owner/repo>#<release tag> <plugin>@<marketplace> <commit sha>. The sha is the commit the tag must resolve to, so a
 # moved tag fails the install. The Update skills workflow bumps tags to the latest release, together with their sha.
-jarrodwatts/claude-hud#v0.14.1 claude-hud@claude-hud 83e98cf0806d137ea94133ea4945821ede9ee420
+jarrodwatts/claude-hud#v0.14.2 claude-hud@claude-hud 2b768087db2a0f72fb4dc017f1349375aba87197

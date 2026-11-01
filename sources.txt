@@ -1,4 +1,4 @@
 # Third-party skill sources, one per line: <owner/repo>#<release tag> [skill,skill,...]
 # No skill list installs every skill in the source. Always pin a tag: without one, npx skills
 # installs the default branch. The Update skills workflow bumps tags to the latest release.
-ypxing/coding-crew#v2.3.6
+ypxing/coding-crew#v2.3.8
