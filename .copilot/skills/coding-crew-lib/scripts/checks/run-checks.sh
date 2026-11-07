@@ -8,8 +8,13 @@
 # Order: typecheck, lint, test, coverage, integration: the checks write-commands-cache.sh writes. In docker mode with no override
 # yet, the dependency install runs once first; if it fails, no check runs (CHECKS: fail).
 # Prints per check `<key>: pass`, `<key>: fail (exit N)` (then its output tail and log path), `<key>: NOT
-# RUN: no command found` (the cache's null), or `<key>: modified files: <list>` (the check rewrote files;
-# then a fail); last, CHECKS: pass (exit 0) | CHECKS: fail (exit 1) | DISCOVER (exit 3: no usable cache).
+# RUN: no command found` (the cache's null), or `<key>: modified files: <list>` (then a fail); last,
+# CHECKS: pass (exit 0) | CHECKS: fail (exit 1) | DISCOVER (exit 3: no usable cache).
+#
+# A check that rewrites tracked files (a `lint --fix`) is not a fail by itself: every check then runs a
+# second time on the rewritten tree, and any change there fails. `<key>: rewrote: <files>` lines, one per
+# check that rewrote, come before the CHECKS line, on a pass or a fail; the rewrites stay in the tree, for
+# the caller to commit. A file a check creates or removes that git does not ignore always fails.
 
 set -uo pipefail
 
@@ -47,14 +52,46 @@ fi
 
 KEYS=(typecheck lint test coverage integration)
 
-# A check must leave the tree as it found it; prior dirt is in the before snapshot.
+# Prior dirt is in the before snapshot, so only what the check itself changed counts. -z: git quotes a
+# path with a space or a non-ASCII byte otherwise, and the `rewrote:` names go to `git add` as written.
 _tree_state() {
-  git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null | LC_ALL=C sort
+  git -C "$PROJECT_ROOT" status --porcelain -z --no-renames 2>/dev/null | tr '\0' '\n' | LC_ALL=C sort
 }
+# "<blob> <path>" per dirty or untracked file: a rewrite of a file already dirty (the caller's own edits, or
+# the first pass's rewrite) leaves its porcelain line as it was.
+_content_state() {
+  local top paths
+  top=$(git -C "$PROJECT_ROOT" rev-parse --show-toplevel 2>/dev/null) || return 0
+  paths=$(cd "$top" && { git diff --name-only -z HEAD 2>/dev/null; git ls-files -o -z --exclude-standard; } |
+    tr '\0' '\n' | LC_ALL=C sort -u | while IFS= read -r p; do [ ! -f "$p" ] || printf '%s\n' "$p"; done)
+  [ -n "$paths" ] || return 0
+  paste -d' ' <(cd "$top" && git hash-object --stdin-paths <<<"$paths") <(printf '%s\n' "$paths")
+}
+# _changed_files <before> <after> <tracked|untracked|all> — the paths whose porcelain line differs, comma-separated.
+# A deleted tracked file counts as untracked: removing a file is not a rewrite.
 _changed_files() {
-  LC_ALL=C comm -3 <(printf '%s\n' "$1") <(printf '%s\n' "$2") \
-    | sed -E 's/^\t//; s/^...//' \
-    | awk 'NF && !seen[$0]++ { printf "%s%s", (n++ ? ", " : ""), $0 }'
+  LC_ALL=C comm -3 <(printf '%s\n' "$1") <(printf '%s\n' "$2") | sed -E 's/^\t//' |
+    awk -v want="$3" 'NF { u = substr($0, 1, 2) == "??" || substr($0, 1, 2) ~ /D/
+      if (want == "all" || (want == "untracked") == u) { p = substr($0, 4); if (!seen[p]++) printf "%s%s", (n++ ? ", " : ""), p } }'
+}
+_changed_content() {
+  LC_ALL=C comm -3 <(printf '%s\n' "$1" | LC_ALL=C sort) <(printf '%s\n' "$2" | LC_ALL=C sort) | sed -E 's/^\t//' | cut -d' ' -f2- |
+    awk 'NF && !seen[$0]++ { printf "%s%s", (n++ ? ", " : ""), $0 }'
+}
+# _rewritten_content <before> <after> — the files in both content snapshots whose blob changed, comma-separated:
+# a rewrite of a file already dirty. A file new in <after> is one the check created (git status may name only its
+# new directory), never a rewrite.
+_rewritten_content() {
+  awk 'NR == FNR { b[substr($0, index($0, " ") + 1)] = $1; next }
+    { p = substr($0, index($0, " ") + 1) } NF && (p in b) && b[p] != $1 && !seen[p]++ { printf "%s%s", (n++ ? ", " : ""), p }' \
+    <(printf '%s\n' "$1") <(printf '%s\n' "$2")
+}
+# _join <exclude> <list>… — the comma-separated lists as one, each path once, leaving out those in <exclude>.
+_join() {
+  local exclude=$1; shift
+  printf '%s\n' "$@" |
+    awk -v ex="$exclude" 'BEGIN { n = split(ex, e, /, /); for (i = 1; i <= n; i++) skip[e[i]] = 1 }
+      { m = split($0, p, /, /); for (i = 1; i <= m; i++) if (p[i] != "" && !skip[p[i]] && !seen[p[i]]++) printf "%s%s", (k++ ? ", " : ""), p[i] }'
 }
 
 # Without a log dir every check would write to /<key>.log and fail, blaming the project for a full disk.
@@ -76,38 +113,69 @@ if grep -qx 'INSTALL_MODE=docker' <<< "$(bash "$SELF_DIR/resolve-mode.sh" --proj
   fi
 fi
 
-OVERALL=0
-for key in "${KEYS[@]}"; do
-  case "$key" in coverage|integration) commands_field_present "$CACHE" "$key" || continue ;; esac
-  cmd="$(commands_field "$CACHE" "$key")"
-  if [ -z "$cmd" ]; then
-    echo "$key: NOT RUN: no command found"
-    continue
-  fi
-  log="$LOG_DIR/$key.log"
-  echo "=== $key: $cmd"
-  before="$(_tree_state)"
-  # stdin from /dev/null: a `docker compose run` would otherwise read the rest of this loop. Logged
-  # through a pipe: on overlayfs a check writing straight to a file under /tmp can hang forever.
-  bash "$RUN_SCRIPT" --project-root "$PROJECT_ROOT" -- "$cmd" \
-    </dev/null 2>&1 | cat >"$log"
-  rc=${PIPESTATUS[0]}
-  after="$(_tree_state)"
-  changed=""
-  [ "$before" = "$after" ] || changed="$(_changed_files "$before" "$after")"
-  tail -n 80 "$log"
-  if [ -n "$changed" ]; then
-    echo "$key: modified files: $changed — the check rewrote them: run it, commit the result, and re-run (a check that rewrites files on every run needs a non-mutating command in $CACHE)"
-    echo "$key: fail (exit $rc, modified files)"
-    OVERALL=1
-  elif [ "$rc" -eq 0 ]; then
-    echo "$key: pass"
-  else
-    echo "$key: fail (exit $rc)"
-    OVERALL=1
-  fi
-  echo "$key: log: $log"
-done
+REWROTE=() PASS_FAIL=0 CREATED_FAIL=0
+# run_pass <1|2> — every check once. Pass 1 counts a rewrite of tracked files apart from a fail; pass 2 fails
+# on any change at all.
+run_pass() {
+  local pass=$1 key cmd log before after cbefore cafter content rc changed created
+  PASS_FAIL=0
+  for key in "${KEYS[@]}"; do
+    case "$key" in coverage|integration) commands_field_present "$CACHE" "$key" || continue ;; esac
+    cmd="$(commands_field "$CACHE" "$key")"
+    if [ -z "$cmd" ]; then
+      [ "$pass" = 2 ] || echo "$key: NOT RUN: no command found"
+      continue
+    fi
+    log="$LOG_DIR/$key.log"
+    [ "$pass" = 1 ] || log="$LOG_DIR/$key.pass2.log"
+    echo "=== $key$([ "$pass" = 1 ] || echo " (second pass)"): $cmd"
+    before="$(_tree_state)"
+    cbefore="$(_content_state)"
+    # stdin from /dev/null: a `docker compose run` would otherwise read the rest of this loop. Logged
+    # through a pipe: on overlayfs a check writing straight to a file under /tmp can hang forever.
+    bash "$RUN_SCRIPT" --project-root "$PROJECT_ROOT" -- "$cmd" \
+      </dev/null 2>&1 | cat >"$log"
+    rc=${PIPESTATUS[0]}
+    after="$(_tree_state)"
+    tail -n 80 "$log"
+    cafter="$(_content_state)" changed="" created=""
+    content=""
+    if [ "$pass" = 1 ]; then
+      [ "$cbefore" = "$cafter" ] || content="$(_rewritten_content "$cbefore" "$cafter")"
+      created="$(_changed_files "$before" "$after" untracked)"
+      changed="$(_join "$created" "$(_changed_files "$before" "$after" tracked)" "$content")"
+      [ -z "$changed" ] || REWROTE+=("$key: rewrote: $changed")
+      changed=""
+    else
+      [ "$cbefore" = "$cafter" ] || content="$(_changed_content "$cbefore" "$cafter")"
+      changed="$(_join "" "$(_changed_files "$before" "$after" all)" "$content")"
+    fi
+    if [ -n "$created" ]; then
+      echo "$key: modified files: $created — the check created or removed files git does not ignore: ignore them, or name a command for it in $CACHE that leaves none"
+      echo "$key: fail (exit $rc, modified files)"
+      CREATED_FAIL=1
+    elif [ -n "$changed" ]; then
+      echo "$key: modified files: $changed — the check rewrote them again on a second run: name a non-mutating command for it in $CACHE"
+      echo "$key: fail (exit $rc, modified files)"
+      PASS_FAIL=1
+    elif [ "$rc" -eq 0 ]; then
+      echo "$key: pass"
+    else
+      echo "$key: fail (exit $rc)"
+      PASS_FAIL=1
+    fi
+    echo "$key: log: $log"
+  done
+}
 
+run_pass 1
+# The second pass gates the tree the caller commits, so its verdict replaces the first's.
+if [ "${#REWROTE[@]}" -gt 0 ]; then
+  echo "=== checks rewrote files: running every check again"
+  run_pass 2
+fi
+OVERALL=0
+[ "$PASS_FAIL" = 0 ] && [ "$CREATED_FAIL" = 0 ] || OVERALL=1
+[ "${#REWROTE[@]}" -eq 0 ] || printf '%s\n' "${REWROTE[@]}"
 if [ "$OVERALL" -eq 0 ]; then echo "CHECKS: pass"; else echo "CHECKS: fail"; fi
 exit "$OVERALL"
