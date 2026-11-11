@@ -17,9 +17,9 @@ nothing ready: your caller decides what to do with the report.
 <!-- fragment:missing-library -->
 **Shared scripts.** The scripts this skill runs live in the `coding-crew-lib` skill, installed beside it at
 `<skill-dir>/../coding-crew-lib` (`<skill-dir>` being the directory you read this file from). Before the first
-command that runs one, check that directory exists. If it does not, stop and tell the user to install it at this
-skill's scope, `npx skills add ypxing/coding-crew -s coding-crew-lib` (adding `-g` when this skill is installed at
-user level), or to re-run coding-crew's `install.sh`.
+command that runs one, check that directory exists. If it does not, stop and tell the user to install it from the
+source and at the scope they installed this skill from (`npx skills add <that source> -s coding-crew-lib`, adding
+`-g` when this skill is installed at user level), or to re-run coding-crew's `install.sh`.
 <!-- /fragment:missing-library -->
 
 ## Inputs
@@ -40,6 +40,8 @@ Your caller names them; a bare number is a PR, nothing at all is the current bra
     `spec --feature-slug <s>` output; else the whole body. Read the marker,
     never the body's `Spec:` line. A branch with no spec named has none.
 - **The report's path.** Write the report there; with none, print it.
+- **Files naming tests**, when your caller gives them: lines `<file>: <test name> — …`. Read them for the tests'
+  names only; whether a test covers a criterion is still yours to check.
 
 ## Run
 
@@ -60,21 +62,51 @@ your host, do the review yourself.
 
 ## Review
 
-Leave the repo as you found it: never edit, commit or change its tree. Run what helps — the tests, the scripts
-under review, experiments — in a scratch copy when they would write to it, in a new directory from `mktemp -d`, never
-a fixed path such as `/tmp/<name>`: other reviews share the machine.
+Leave the repo as you found it: never edit, commit or change its tree, the keyed checks below excepted. Run what
+else helps — a single test file, the scripts under review, experiments — in a scratch copy when they would write to
+it, in a new directory from `mktemp -d`, never a fixed path such as `/tmp/<name>`: other reviews share the machine.
 
 <!-- fragment:project-commands -->
-**Run every project command through `run.sh`** — test runs, type checks, linting, a look at an installed
-dependency, and any ad-hoc command, a one-off `docker compose` one included. It runs the command where the dev
-commands file's `install_mode` says: inside docker (with this checkout's compose override), where a docker-mode
-project's dependencies are installed and the host has none, or on the host. Never hand-build a `docker compose`
-command.
+**Run a project check by its key through `run-checks.sh`** — the suite, lint, typecheck, any key the dev commands
+file has — never by retyping its command line: the dev commands file (a host's `CREW_COMMANDS_FILE` included)
+decides what a key runs, and the command it gives may not be the one you would type. It runs every check and prints
+each as `=== <key>: <command>`, then `<key>: pass` or `<key>: fail (exit N)`.
+
+```bash
+bash "<skill-dir>/../coding-crew-lib/scripts/checks/run-checks.sh" --project-root "$(git rev-parse --show-toplevel)"
+```
+
+**Run every other project command through `run.sh`** — one test file, a look at an installed dependency, and any
+ad-hoc command, a one-off `docker compose` one included. It runs the command where the dev commands file's
+`install_mode` says: inside docker (with this checkout's compose override),
+where a docker-mode project's dependencies are installed and the host has none, or on the host. Never hand-build a
+`docker compose` command. A failure from such a command that looks like the environment (a missing service, socket
+or env variable) is re-checked with `run-checks.sh` before any verdict.
 
 ```bash
 bash "<skill-dir>/../coding-crew-lib/scripts/checks/run.sh" --project-root "$(git rev-parse --show-toplevel)" -- "<command>"
 ```
 <!-- /fragment:project-commands -->
+
+Run the project's checks by key in the reviewed repo itself, not a scratch copy: its checks passed and their
+rewrites were committed before review, so the run should leave the tree as it found it, and a `<key>: rewrote:` or
+`<key>: modified files:` line from it is a finding. Before the run, copy each file `git status --porcelain` lists to
+a new `mktemp -d` directory, and the index (`git rev-parse --git-path index`) to a `mktemp` file, so uncommitted and
+staged edits survive the checks' rewrites; afterwards copy the index back first, since a check may `git add` its
+output, then put back each file those lines name — from that
+copy when it was dirty before, else remove one the run created (`git clean -f -- <file>`) or restore one it rewrote or
+removed (`git checkout -- <file>`) — then remove both copies. A failure from a command run other than by key, such as a single
+test file or an ad-hoc `npm test`, is never a finding until the keyed check fails too; an environment failure (a
+missing service, socket or env variable) is the environment, not the change. The one exception is a repo with no
+dev commands file (`run-checks.sh` prints `DISCOVER`): there a failing test is a finding only when the same command,
+run the same way, passes on base in its own `git worktree add --detach` in a new `mktemp -d` directory (removed
+afterwards), and the change touches the test or the code it covers — an environment failure fails on base too. When
+base cannot be run, report it as not verified here, not as a finding. Narrow commands still help to probe a
+finding. Compare against base only when a keyed check fails at HEAD: `git worktree add --detach` the base commit in
+a new `mktemp -d` directory, run `run-checks.sh` there with no dependency install, and remove that worktree
+afterwards; a base run that fails on missing dependencies is no comparison. A docker-mode project (`install_mode`
+`docker`) gets no comparison: in a new worktree `run-checks.sh` installs first. Never check out, switch or stash in
+the reviewed repo.
 
 Start helper subagents whenever they help. Every judgement about the change is made on your model, never a weaker
 one, and the report is yours, judged across the whole change.
@@ -143,8 +175,13 @@ Finish by writing the report as JSON to the path you were given, or printing it 
  "gaps": ["each spec requirement the code at HEAD lacks or does differently (question 1)"],
  "findings": [{"severity": "CRITICAL|HIGH|MEDIUM|LOW", "location": "<file:line>",
                "issue": "<trigger → bad outcome, or the rule broken, or the addition no requirement needs>",
-               "fix": "<the smallest change>"}]}
+               "fix": "<the smallest change>"}],
+ "criteria": [{"issue": "<the spec section's id>", "text": "<the criterion>", "met": true,
+               "tests": ["<file>: <test name>"]}]}
 ```
 
-`spec` is `met` when `gaps` is empty, and `none` with empty `gaps` when there was no spec. Close with a few lines
+`spec` is `met` when `gaps` is empty, and `none` with empty `gaps` when there was no spec. `criteria` lists each
+criterion of the spec once: `issue` is the id from its section's `### <id> — <title>` heading (empty when the spec
+has none), `met` whether the code at HEAD meets it, and `tests` the tests that show it. Name a test as
+`<file>: <test name>`, and one listed in a file your caller gave by copying that part of its line verbatim. Close with a few lines
 of prose explaining it.

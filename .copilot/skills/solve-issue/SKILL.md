@@ -23,17 +23,20 @@ the words, not the wire format:
   a `[WIP]` marker (Step 6) so the branch preserves it, and say what remains. A later round resumes here.
 - **`blocked`** — cannot proceed without human input or an environment fix. Not a way to avoid
   reporting `partial`. A failure that names something **no file in this repo can provide** — a
-  credential, a license, a daemon, a registry, an external service — is `blocked`: run the
-  project's documented command for it **once**, keep that command, its exit code and its verbatim
-  output as the evidence, and stop. Do not start services by hand, search for tokens, or edit
+  credential, a license, a daemon, a registry, an external service — is `blocked`. For a failure of
+  something a check runs, the evidence is one `run-checks.sh` run (Step 5), or `run.sh`'s
+  docker-install stop (Step 2): a failure seen from a command line you typed, through `run.sh` or
+  not, is first re-checked with `run-checks.sh`, and only its result decides `blocked` — the dev
+  commands file may run that check differently. A failing command no check key runs (a registry
+  login, a migration) is run through `run.sh` **once**, its output the evidence. Keep the command,
+  its exit code and its verbatim output, and stop. Do not start services by hand, search for tokens, or edit
   compose files or the Makefile to get around it: whatever you start is gone before anyone re-runs
   the checks, so a pass that depended on it proves nothing. Setup *inside* the repo that the issue
   asks for (helpers, wiring, config) is still coding, and in scope. A `blocked` run that changed files
   commits them with a `[WIP]` marker too (Step 6).
 
 Every outcome but `complete` commits your own changes and leaves the issue open: what a caller checks next
-is the branch's commits and the tracker, not your working directory. The one exception is files a check
-rewrote that this change didn't touch (Step 5), left uncommitted for a human.
+is the branch's commits and the tracker, not your working directory.
 
 When you stop on a blocker, always output:
 
@@ -42,6 +45,9 @@ BLOCKED: <reason>
 $ <command> (exit <N>)
 <verbatim output, or the dependency name>
 ```
+
+For a failed check, `<command>` and `<N>` are the failing key's command and exit code as `run-checks.sh`
+prints them (`=== <key>: <cmd>`, `<key>: fail (exit N)`). Preflight and premise stops keep their own form.
 
 Do not attempt workarounds.
 
@@ -57,9 +63,9 @@ it as a literal: each bash call is a fresh shell.
 <!-- fragment:missing-library -->
 **Shared scripts.** The scripts this skill runs live in the `coding-crew-lib` skill, installed beside it at
 `<skill-dir>/../coding-crew-lib` (`<skill-dir>` being the directory you read this file from). Before the first
-command that runs one, check that directory exists. If it does not, stop and tell the user to install it at this
-skill's scope, `npx skills add ypxing/coding-crew -s coding-crew-lib` (adding `-g` when this skill is installed at
-user level), or to re-run coding-crew's `install.sh`.
+command that runs one, check that directory exists. If it does not, stop and tell the user to install it from the
+source and at the scope they installed this skill from (`npx skills add <that source> -s coding-crew-lib`, adding
+`-g` when this skill is installed at user level), or to re-run coding-crew's `install.sh`.
 <!-- /fragment:missing-library -->
 
 <!-- fragment:tracker-configuration -->
@@ -180,11 +186,21 @@ call (`grep -rn -E 'patternA|patternB'`) and read several files per turn.
 ### 4. Implement with TDD
 
 <!-- fragment:project-commands -->
-**Run every project command through `run.sh`** — test runs, type checks, linting, a look at an installed
-dependency, and any ad-hoc command, a one-off `docker compose` one included. It runs the command where the dev
-commands file's `install_mode` says: inside docker (with this checkout's compose override), where a docker-mode
-project's dependencies are installed and the host has none, or on the host. Never hand-build a `docker compose`
-command.
+**Run a project check by its key through `run-checks.sh`** — the suite, lint, typecheck, any key the dev commands
+file has — never by retyping its command line: the dev commands file (a host's `CREW_COMMANDS_FILE` included)
+decides what a key runs, and the command it gives may not be the one you would type. It runs every check and prints
+each as `=== <key>: <command>`, then `<key>: pass` or `<key>: fail (exit N)`.
+
+```bash
+bash "<skill-dir>/../coding-crew-lib/scripts/checks/run-checks.sh" --project-root "$(git rev-parse --show-toplevel)"
+```
+
+**Run every other project command through `run.sh`** — one test file, a look at an installed dependency, and any
+ad-hoc command, a one-off `docker compose` one included. It runs the command where the dev commands file's
+`install_mode` says: inside docker (with this checkout's compose override),
+where a docker-mode project's dependencies are installed and the host has none, or on the host. Never hand-build a
+`docker compose` command. A failure from such a command that looks like the environment (a missing service, socket
+or env variable) is re-checked with `run-checks.sh` before any verdict.
 
 ```bash
 bash "<skill-dir>/../coding-crew-lib/scripts/checks/run.sh" --project-root "$(git rev-parse --show-toplevel)" -- "<command>"
@@ -197,6 +213,14 @@ affects. Other workers share this machine: temp files go under `$PROJECT_ROOT`, 
 such as `/tmp/<name>`; never kill a process you did not start.
 
 STOP. Read and invoke the `tdd` skill before writing a single line of implementation. Do not proceed until the red/green loop is complete. Honor the style contract from Step 3.
+
+**Red evidence.** When your caller names a red-evidence file, each new test's red run appends one line per test to
+it: `<file>: <test name> — <failing line>`, the test file's repo-relative path, the test's name, and the one line of
+the failure that says what was wrong, trimmed. When one error fails several tests at once (an import error failing
+a whole file), each test gets its own line, the failing line repeated on each — never one line for several: a line
+is matched to its test by its exact start. The name is the test's as its runner prints it, taken from its green run
+when the red run reported only the file, else as written in the test source. A test never seen failing gets no
+line; one that failed only through its file's error was seen failing. With no file named, write none.
 
 **Comments.** A comment states a non-obvious *why* in 1–3 lines. History, PR and issue numbers,
 and incident counts go in the commit message or PR body, never in code; neither does a comment that
@@ -231,7 +255,7 @@ or touch unrelated doc sections.
 
 ### 5. Verify
 
-This is the one full-suite run:
+Run every check once more on the finished work:
 
 ```bash
 bash "<skill-dir>/../coding-crew-lib/scripts/checks/run-checks.sh" --project-root "$PROJECT_ROOT"
@@ -241,13 +265,14 @@ It runs every check in the dev commands file (`coding-crew-lib/scripts/checks/co
 `coverage` and `integration` when the file has them — each through `run.sh`, and reports each. `NOT RUN: no
 command found` means no local command exists: report it, do not re-check CLAUDE.md/Makefile.
 
-- `CHECKS: pass` — continue.
+- `CHECKS: pass` — continue. A `<key>: rewrote: <files>` line is still a pass: the check fixed those
+  files and its second run left them as they were. Keep every file any `rewrote:` line names this
+  session for Step 6's rewrites commit.
 - `CHECKS: fail` — fix the code and re-run. When the same check still fails after 2 distinct fix
   attempts, whether or not its error changed, stop: the run is `partial`, naming the check and its
-  output. Except `<key>: modified files:` — the check rewrote files this change didn't touch, which a
-  human commits — and a failure naming what no repo file can provide (§ Outcome): report
-  `blocked` with that output. The modified-files line's "run it, commit the result, and re-run" is
-  for that person, not for you.
+  output. A `<key>: modified files:` fail is a check that rewrites files on every run, or creates
+  or removes ones git does not ignore: a fail like any other, its line naming the fix for a person. A failure
+  naming what no repo file can provide (§ Outcome) is `blocked`: report it with that output.
 - `DISCOVER` — no dev commands file yet. Run `(cd "$PROJECT_ROOT" && bash "<skill-dir>/../coding-crew-lib/scripts/checks/discover-commands.sh")`,
   follow its prompt, then re-run `run-checks.sh`.
 
@@ -275,6 +300,12 @@ $DETAILS}" \
 ```
 
 Example: `[01-auth-logout] Add user logout endpoint`. Do not push.
+
+Then, when Step 5's `rewrote:` lines named files, commit those still changed as their own commit, so a
+reviewer sees formatting churn apart from the work: the same command with the same prefix, the message
+`Apply the checks' rewrites` and those files as `--files` (the line separates them with `, `; pass a name
+with a space as its own `--files`), on every outcome. A file you edited again after
+the run that rewrote it goes in the work commit.
 
 ### 6.5. The dev commands file
 
