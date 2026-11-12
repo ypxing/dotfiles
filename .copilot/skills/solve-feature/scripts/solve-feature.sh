@@ -3,34 +3,62 @@
 # loop and runs each issue's coder (between `next` and `land`), a conflicting merge's resolver (between `sync`'s exit 4
 # and its re-run), the review's reviewer (before `reviewed`) and fixer
 # (before `fix`) and the PR's writer (before `describe`) as subagents of the host agent; every guard is an exit code here.
-#   start <slug> [--branch <name>] | next <slug> | land <slug> <ref> <branch> | sync <slug> <branch>
+#   start <slug> [--branch <name>] [--review-since <sha>] | start --spec <file> --issue <n> [--branch …] [--review-since …]
+#   | next <slug> | land <slug> <ref> <branch> | sync <slug> <branch>
 #   | reviewed <slug> <pr> <branch> | fix <slug> <pr> <branch> | describe <slug> <pr> — each function's comment states its contract.
 # Exit: 0 ok; 1 a stop (its one-line result in .coding-crew/solve-feature/outcome); 2 a usage error; 3 from next
 # when no ready issue is left; 4 from sync when its merge of the default branch conflicts, left in progress.
 set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOGS=""
+# default_branch — origin's default branch, as origin/HEAD names it, else main.
+default_branch() {
+  local d; d=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || true)
+  echo "${d:-main}"
+}
 # The run's one-line result, read by a host such as the Actions job; a missing file means it never finished.
 # next only reads the tracker, so a stop it writes after another stop is that stop's consequence: it keeps the first.
 outcome() {
   [ -n "$LOGS" ] || return 0
   [ "$CMD" = next ] && grep -q '^stopped:' "$LOGS/outcome" 2>/dev/null && return 0
   printf '%s\n' "$1" >"$LOGS/outcome"
+  # result.json: the same ending with its evidence, for a host that writes the PR itself. Removed first, so a failed
+  # render leaves none rather than an earlier ending's; the failure never changes this ending.
+  rm -f "$LOGS/result.json"
+  # A stop before its step looked the PR up (a re-run's land, say) still names the open PR; one on the default branch,
+  # before start's checkout, has none to look up.
+  if [ -z "${PR:-}${PR_N:-}" ] && [ "${PUBLISH:-}" = yes ] && declare -F pr_view >/dev/null; then
+    local b; b=$(git branch --show-current 2>/dev/null || true)
+    [ -z "$b" ] || [ "$b" = "$(default_branch)" ] || { BRANCH=${BRANCH:-$b}; pr_view; }
+  fi
+  node "$SELF/result.mjs" --logs "$LOGS" --slug "$SLUG" --cli "${CLI:-}" --default "$(default_branch)" --publish "${PUBLISH:-yes}" --pr "${PR:-${PR_N:-}}" --main-root "$MAIN_ROOT" ||
+    echo "solve-feature: writing $LOGS/result.json failed (see above)" >&2
 }
 die() { echo "solve-feature: $*" >&2; outcome "stopped: $CMD failed: $*"; exit 1; }
 usage() {
   [ -z "${1:-}" ] || echo "solve-feature: $1" >&2
-  echo "usage: solve-feature.sh start <slug> [--branch <name>] | next <slug> | land <slug> <ref> <branch> | sync <slug> <branch> | reviewed <slug> <pr> <branch> | fix <slug> <pr> <branch> | describe <slug> <pr>" >&2; exit 2
+  echo "usage: solve-feature.sh start <slug> [--branch <name>] [--review-since <sha>] | next <slug> | land <slug> <ref> <branch> | sync <slug> <branch> | reviewed <slug> <pr> <branch> | fix <slug> <pr> <branch> | describe <slug> <pr> | start --spec <file> --issue <n> [--branch <name>] [--review-since <sha>]" >&2; exit 2
 }
 
 CMD="${1:-}"; [ $# -eq 0 ] || shift
-SLUG="" BRANCH="" REF="" PR=""
+SLUG="" BRANCH="" REF="" PR="" SINCE="" SPEC="" ISSUE=""
 case "$CMD" in
   start) while [ $# -gt 0 ]; do case "$1" in
       --branch) [ $# -ge 2 ] || usage "--branch needs a value"; BRANCH="$2"; shift 2 ;;
+      --review-since) [ $# -ge 2 ] && [ -n "$2" ] || usage "--review-since needs a value"; SINCE="$2"; shift 2 ;;
+      --spec) [ $# -ge 2 ] && [ -n "$2" ] || usage "--spec needs a value"; SPEC="$2"; shift 2 ;;
+      --issue) [ $# -ge 2 ] || usage "--issue needs a value"; ISSUE="$2"; shift 2 ;;
       -*) usage "unknown flag: $1" ;;
       *) [ -z "$SLUG" ] || usage "unexpected argument: $1"; SLUG="$1"; shift ;;
-    esac; done ;;
+    esac; done
+    if [ -n "$SPEC$ISSUE" ]; then
+      [ -n "$SPEC" ] && [ -n "$ISSUE" ] || usage "--spec and --issue go together"
+      [ -z "$SLUG" ] || usage "--spec takes no feature slug: the feature is issue-<n>"
+      # <n> reaches a path and argv.
+      [[ "$ISSUE" =~ ^[0-9]+$ ]] || usage "--issue '$ISSUE' is not a number"
+      SLUG="issue-$ISSUE"
+      case "$SPEC" in /*) ;; *) SPEC="$PWD/$SPEC" ;; esac # before the cd to the top level below
+    fi ;;
   next) [ $# -eq 1 ] || usage; SLUG="$1" ;;
   land) [ $# -eq 3 ] || usage; SLUG="$1" REF="$2" BRANCH="$3" ;;
   sync) [ $# -eq 2 ] || usage; SLUG="$1" BRANCH="$2" ;;
@@ -48,27 +76,40 @@ LOGS="$ROOT/.coding-crew/solve-feature"
 # The main checkout, as the tracker finds it: its .coding-crew/ files are read from every worktree, committed or not.
 MAIN_ROOT=$(git rev-parse --path-format=absolute --git-common-dir)
 [ "$(basename "$MAIN_ROOT")" = .git ] && MAIN_ROOT=$(dirname "$MAIN_ROOT") || MAIN_ROOT="$ROOT"
+# A spec kept in $LOGS itself: start and the later steps delete or rewrite its files, so it is refused. The stop
+# writes its outcome and result.json unless the spec is one of them.
+if [ -n "$SPEC" ] && [ -d "$(dirname "$SPEC")" ] && [ "$(cd "$(dirname "$SPEC")" && pwd -P)" = "$(cd "$LOGS" && pwd -P)" ]; then
+  case "$(basename "$SPEC")" in outcome | result.json) LOGS="" ;; esac
+  die "--spec $SPEC is in this run's own directory, whose files start deletes or a later step rewrites: keep the spec outside the checkout or in an ignored path elsewhere"
+fi
 # The setup files a user commits once satisfied: no tree check counts them, and no run commits them. A dev commands
 # file this tree tracks is not one: it is the branch's own copy, the one its checks read, counted and committed.
-BRANCH_WORK=(. ':!.coding-crew/config.json')
-git ls-files --error-unmatch -- .coding-crew/dev-commands.json >/dev/null 2>&1 || BRANCH_WORK+=(':!.coding-crew/dev-commands.json')
-[ "$CMD" != start ] || rm -f "$LOGS/outcome" "$LOGS"/pr-*.unfixed.md "$LOGS"/pr-*.review.json "$LOGS"/pr-*.summary.md "$LOGS"/pr-*.attention.md "$LOGS"/pr-*.head \
-  "$LOGS"/pr-*.discarded.md "$LOGS"/pr-*.notes.md "$LOGS/review.base"
+BRANCH_WORK=(. ':!.coding-crew/config.json') SETUP_FILES=(.coding-crew/config.json)
+git ls-files --error-unmatch -- .coding-crew/dev-commands.json >/dev/null 2>&1 ||
+  { BRANCH_WORK+=(':!.coding-crew/dev-commands.json'); SETUP_FILES+=(.coding-crew/dev-commands.json); }
+[ "$CMD" != start ] || rm -f "$LOGS/outcome" "$LOGS/result.json" "$LOGS/spec.md" "$LOGS"/pr-*.r[0-9]*.* "$LOGS"/*.checks.head "$LOGS"/pr-*.unfixed.json "$LOGS"/pr-*.review.json "$LOGS"/pr-*.summary.md "$LOGS"/pr-*attention.json "$LOGS"/pr-*.head \
+  "$LOGS"/pr-*.discarded.md "$LOGS"/pr-*.notes.md "$LOGS/review.base" "$LOGS/review.since"
 # solveFeature.publish: false keeps the run on this machine: no push, no PR, the body in local_body's file. Read from
 # the user-level config only: an Actions runner has none, so it never keeps commits that vanish with the runner.
+# CREW_PUBLISH=false does the same for a host that pushes the commits itself and has no user config to write.
 PUBLISH=yes
 [ "$(jq -r '.solveFeature.publish' "$HOME/.coding-crew/config.json" 2>/dev/null || true)" != false ] || PUBLISH=no
+[ "${CREW_PUBLISH:-}" != false ] || PUBLISH=no
 # Keyed by branch as `gh pr view "$BRANCH"` is; not pr-body.md, land's draft body in publish mode.
 local_body() { echo "$LOGS/local-pr-${BRANCH//\//_}.md"; }
+# The issue next handed out for this feature until its land records it: per feature, as runs share this directory.
+landing() { echo "$LOGS/landing-$SLUG"; }
 # The tracker and checks libraries, in the coding-crew-lib skill installed beside this one.
 CLI="$SELF/../../coding-crew-lib/scripts/tracker/cli.mjs" CHECKS="$SELF/../../coding-crew-lib/scripts/checks"
-[ -f "$CLI" ] || die "tracker CLI not found ($CLI): install the coding-crew-lib skill beside solve-feature (npx skills add ypxing/coding-crew -s coding-crew-lib, adding -g at user level) or re-run install.sh"
+[ -f "$CLI" ] || die "tracker CLI not found ($CLI): install the coding-crew-lib skill beside solve-feature, from the source you installed solve-feature from (npx skills add <that source> -s coding-crew-lib, adding -g at user level) or re-run install.sh"
 
 # push <git push args> — `git push -q`; on failure sets PUSH_WHY to git's reason and returns 1. git's stderr still
 # reaches the terminal. The reason: a rejected ref's parenthesised one (GitHub's workflow-permission refusal arrives
-# there), else git's last fatal:/error: line, else its last non-empty one (a network failure ends in advice).
+# there), else git's last fatal:/error: line, else its last non-empty one (a network failure ends in advice). With
+# PUBLISH=no it pushes nothing and succeeds.
 PUSH_WHY=""
 push() {
+  [ "$PUBLISH" = yes ] || return 0
   local err="$LOGS/push.err" rc=0
   git push -q "$@" 2>"$err" || rc=$?
   cat "$err" >&2
@@ -97,12 +138,6 @@ merge_in() {
 # fetch_branch — fetch origin's copy of $BRANCH; with PUBLISH=no origin usually has none, which is no error to show.
 fetch_branch() { if [ "$PUBLISH" = yes ]; then git fetch -q origin "$BRANCH"; else git fetch -q origin "$BRANCH" 2>/dev/null; fi; }
 
-# default_branch — origin's default branch, as origin/HEAD names it, else main.
-default_branch() {
-  local d; d=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || true)
-  echo "${d:-main}"
-}
-
 PR_N="" PR_IS_DRAFT=""
 pr_view() { # sets PR_N and PR_IS_DRAFT (true|false) when the branch has an OPEN PR, else clears them
   if [ "$PUBLISH" = no ]; then PR_IS_DRAFT=""; PR_N=""; [ ! -f "$(local_body)" ] || PR_N=local; return 0; fi
@@ -114,17 +149,54 @@ pr_view() { # sets PR_N and PR_IS_DRAFT (true|false) when the branch has an OPEN
 # pr_body_read <pr> / pr_body_write <pr> <file> [<title>] — the PR body's one store: the PR on GitHub, or with
 # PUBLISH=no the branch's local body file, whose first line is `# <title>` so its reader has both.
 pr_body_read() {
-  # A body a person edited in the web UI comes back with CRLF line endings, which no marker match would see.
+  # A body a person edited, in the web UI or the local file, can come back with CRLF line endings, which no marker
+  # match would see.
   if [ "$PUBLISH" = yes ]; then gh pr view "$1" --json body | jq -r '.body' | tr -d '\r'
-  else tail -n +2 "$(local_body)" | sed '1{/^$/d;}'
+  else tail -n +2 "$(local_body)" | tr -d '\r' | sed '1{/^$/d;}'
   fi
 }
 pr_body_write() {
   local f t="${3:-}"
   if [ "$PUBLISH" = yes ]; then gh pr edit "$1" ${t:+--title "$t"} --body-file "$2" >/dev/null; return; fi
   f=$(local_body)
-  [ -n "$t" ] || [ ! -f "$f" ] || t=$(sed -n '1s/^# //p' "$f")
+  [ -n "$t" ] || [ ! -f "$f" ] || t=$(sed -n '1s/^# //p' "$f" | tr -d '\r')
   { printf '# %s\n\n' "$t"; cat "$2"; } >"$f.tmp" && mv "$f.tmp" "$f"
+}
+
+# pr_open <rs> <body-file> — opens $REF's draft PR with <body-file>, or with PUBLISH=no writes the local body file;
+# sets PR_N to the PR's number or `local`. A failure reopens $REF, as the issue is closed and a re-run would skip it.
+pr_open() {
+  local rc=0 url
+  if [ "$PUBLISH" = no ]; then
+    if ! pr_body_write local "$2" "$(pr_title "$1")"; then
+      local why="cannot write $(local_body)"
+      reopen_ref pr "$why" "Reopen $REF: writing its local PR body failed" "reopen $REF by hand, then fix the cause and re-run"
+      stop pr "$why; $REF is ready again with its work committed on $BRANCH: fix the cause, then re-run"
+    fi
+    PR_N=local; return 0
+  fi
+  url=$(gh pr create --draft --title "$(pr_title "$1")" --body-file "$2" 2>"$LOGS/pr-create.err") || rc=$?
+  cat "$LOGS/pr-create.err" >&2
+  [ "$rc" = 0 ] || pr_create_failed
+  PR_N="${url##*/}"; [[ "$PR_N" =~ ^[0-9]+$ ]] || die "gh pr create printed no PR URL: $url"
+}
+
+# pr_head <pr> — sets PR_HEAD to the head a fix round starts from: the PR's head, or with PUBLISH=no the one sync saved.
+PR_HEAD=""
+pr_head() {
+  if [ "$PUBLISH" = no ]; then
+    PR_HEAD=$(cat "$LOGS/review.base" 2>/dev/null) || die "no saved head at $LOGS/review.base: run sync $SLUG $BRANCH first"
+  else
+    PR_HEAD=$(gh pr view "$1" --json headRefOid | jq -r '.headRefOid // empty') || die "gh pr view $1 failed"
+  fi
+}
+
+# pr_ready <pr> — marks the PR ready for review when it is a draft; with PUBLISH=no there is no PR, so nothing.
+pr_ready() {
+  [ "$PUBLISH" = yes ] || return 0
+  local draft
+  draft=$(gh pr view "$1" --json isDraft | jq -r '.isDraft') || die "gh pr view $1 failed"
+  [ "$draft" != true ] || gh pr ready "$1" >/dev/null || die "gh pr ready $1 failed; the body is written, so run gh pr ready $1 by hand"
 }
 
 # .coding-crew/solve-feature/spec.md, which the reviewer and the PR writer read: the tracker's spec op, the PRD then
@@ -157,16 +229,33 @@ model() {
   done
 }
 
-# start — preconditions, the branch (--branch, else feature/<slug>), spec.md; prints branch=, coder-model=,
-# reviewer-model= and pr= (empty with no open PR).
+# publish_spec — --spec's file as the one-issue local feature $SLUG (publish-spec.sh). An earlier run's landing record
+# goes with the feature it rebuilds, or next would read the rebuilt issue as closed but never landed.
+publish_spec() {
+  local why drafts rc=0
+  # A fresh directory, so clearing it can never delete the spec a host keeps under $LOGS.
+  drafts=$(mktemp -d "$LOGS/spec-drafts.XXXXXX") || die "cannot create a drafts directory in $LOGS (see above)"
+  why=$(bash "$SELF/publish-spec.sh" --cli "$CLI" --main-root "$MAIN_ROOT" --drafts "$drafts" --slug "$SLUG" --spec "$SPEC") || rc=$?
+  rm -rf "$drafts"
+  [ "$rc" = 0 ] || die "${why:-publishing $SPEC failed (see above)}"
+  rm -f "$(landing)"
+}
+
+# start — preconditions, --spec's feature, the branch (--branch, else feature/<slug>), spec.md, --review-since's
+# commit for sync; prints slug= (with --spec), branch=, coder-model=, reviewer-model= and pr= (empty with no open PR).
 start() {
   [ -z "$(git status --porcelain -- "${BRANCH_WORK[@]}")" ] || die "working tree is not clean: commit or stash first"
+  [ -z "$SPEC" ] || publish_spec
   local features; features=$(node "$CLI" features | cut -f1) || die "features failed (see above)"
   grep -qxF "$SLUG" <<<"$features" || die "no feature '$SLUG'; features: $(paste -sd' ' - <<<"$features")"
   # preflight.sh blocks a coder on the default branch, so the branch comes first. Never reset or rebase
   # an existing one: a re-run lands on it as the last run left it, with the default branch merged in (and land and
   # fix merge in origin's copy of the branch, so a commit someone else pushed there never refuses their push).
   git fetch -q origin || die "git fetch origin failed (see above)"
+  if [ -n "$SINCE" ]; then
+    local since; since=$(git rev-parse -q --verify "$SINCE^{commit}") || die "--review-since '$SINCE' is not a commit here or on origin"
+    echo "$since" >"$LOGS/review.since"
+  fi
   local default; default=$(default_branch)
   [ "$BRANCH" != "$default" ] || die "--branch '$BRANCH': '$default' is the default branch; name a feature branch"
   BRANCH=${BRANCH:-feature/$SLUG}
@@ -175,7 +264,7 @@ start() {
   else git checkout -q -b "$BRANCH" "origin/$default"
   fi || { die_setup_clash "$default"; die "cannot check out $BRANCH (see above)"; }
   # A branch origin lacks is new, or one whose first push was refused: a re-run pushes it before any coder runs.
-  [ "$PUBLISH" = no ] || git show-ref --verify -q "refs/remotes/origin/$BRANCH" || push -u origin "$BRANCH" || die "cannot push $BRANCH: $PUSH_WHY"
+  git show-ref --verify -q "refs/remotes/origin/$BRANCH" || push -u origin "$BRANCH" || die "cannot push $BRANCH: $PUSH_WHY"
   # The checks run the branch's own files, so a branch an earlier run left takes the default branch's fixes first.
   local before; before=$(git rev-parse HEAD)
   if ! merge_in "origin/$default"; then
@@ -183,12 +272,13 @@ start() {
     [ -n "$MERGE_CONFLICTS" ] || die "merging origin/$default into $BRANCH failed (see above)"
     die "merging origin/$default into $BRANCH conflicts in $MERGE_CONFLICTS: merge it by hand, $([ "$PUBLISH" = no ] && echo commit || echo "push $BRANCH"), then re-run"
   fi
-  [ "$PUBLISH" = no ] || [ "$(git rev-parse HEAD)" = "$before" ] || push origin "$BRANCH" || die "cannot push $BRANCH after merging origin/$default into it: $PUSH_WHY"
+  [ "$(git rev-parse HEAD)" = "$before" ] || push origin "$BRANCH" || die "cannot push $BRANCH after merging origin/$default into it: $PUSH_WHY"
   write_spec
   pr_view
   # A ready PR would read as reviewed while coders and the review change it; describe marks it ready again.
   [ -z "$PR_N" ] || [ "$PR_IS_DRAFT" != false ] || gh pr ready "$PR_N" --undo >/dev/null ||
     die "gh pr ready $PR_N --undo failed: run gh pr ready $PR_N --undo by hand, then re-run"
+  [ -z "$SPEC" ] || echo "slug=$SLUG"
   echo "branch=$BRANCH"
   echo "coder-model=$(model coder)"
   echo "reviewer-model=$(model reviewer)"
@@ -201,6 +291,10 @@ nothing_left() { # exit 3; with no open PR on the branch, the run has nothing to
     echo "solve-feature: nothing landed: no ready issue for $SLUG and no open PR" >&2
     outcome "stopped: next failed: nothing landed: no ready issue for $SLUG and no open PR"
   else
+    # For the reviewer's prompt: the red files of this feature's issues, never another feature's in this directory.
+    local red; red=$(node "$SELF/result.mjs" --logs "$LOGS" --slug "$SLUG" --main-root "$MAIN_ROOT" --red-files yes) ||
+      die "listing the red-evidence files failed (see above)"
+    echo "red-files=$(paste -sd, - <<<"$red" | sed 's/,/, /g')"
     # Again here, beside the review step: start's line is issues behind by now, and a run lost it once (PR 343).
     echo "reviewer-model=$(model reviewer)"
   fi
@@ -212,24 +306,49 @@ nothing_left() { # exit 3; with no open PR on the branch, the run has nothing to
 next() {
   local rc=0 ref
   ref=$(node "$CLI" next --feature-slug "$SLUG") || rc=$?
-  case $rc in 0) ;; 3) nothing_left ;; *) die "next failed for '$SLUG' (exit $rc, see above)" ;; esac
+  case $rc in 0|3) ;; *) die "next failed for '$SLUG' (exit $rc, see above)" ;; esac
+  # The issue handed out last, cleared once its land records it. Done in the tracker but still named here, it was
+  # closed with no land to gate or record it, and the run would skip it as landed.
+  local on
+  if [ -s "$(landing)" ] && IFS=$'\t' read -r REF on <"$(landing)" && { [ "$rc" = 3 ] || [ "$ref" != "$REF" ]; }; then
+    # Landed on the branch its coder committed to: a re-run on another branch would gate a tree without the work.
+    on=${on:-$(git branch --show-current)}
+    local st src=0 cmds why="$REF is done but its land never finished" todo="land $SLUG $REF $on" go="" rerun="re-run"
+    [ "$on" = "$(git branch --show-current)" ] || go="check out $on and " rerun="re-run with --branch $on"
+    st=$(node "$CLI" status "$REF") || src=$?
+    # Exit 3: the issue is gone (deleted, its file renamed), so there is nothing left to land for it.
+    case $src in 0) ;; 3) rm -f "$(landing)" ;; *) die "status $REF failed (see above)" ;; esac
+    if [ "$st" = done ]; then
+      # shellcheck source=/dev/null
+      . "$CHECKS/commands-file.sh" 2>/dev/null && cmds=$(commands_file "$ROOT") && ! commands_field_present "$cmds" test &&
+        why="$why and no check commands are known" todo="/setup-coding-crew, then $todo"
+      stop land "$why: if its coder finished it, ${go}run $todo; otherwise reopen $REF; then $rerun"
+    fi
+  fi
+  [ "$rc" = 0 ] || nothing_left
   # Saved now, not in land: the local tracker's close moves the file, and fetch then exits 3. fetch runs the
   # backend's validateRef, so a ref it rejects stops here, before it reaches the coder's prompt.
   node "$CLI" fetch "$ref" >"$LOGS/${ref//\//_}.issue.md" || die "fetch $ref failed (see above)"
   # One coder at a time writes its report here; an earlier one's would read as this coder's at land's solve stop.
-  rm -f "$LOGS/coder.report.md" "$LOGS/coder.notes.md"
+  # Its notes go with it, unless this is the same issue again: a land that stopped before there was a PR left them.
+  # Its red lines are this dispatch's coder's, and the ref is kept for result.json, which knows issues by spec id.
+  rm -f "$LOGS/coder.report.md" "$LOGS/${ref//\//_}.red.md"
+  [ "$ref" = "$REF" ] || rm -f "$LOGS/coder.notes.md"
+  printf '%s\n' "$ref" >"$LOGS/${ref//\//_}.ref"
+  printf '%s\t%s\n' "$ref" "$(git branch --show-current)" >"$(landing)"
   echo "$ref"
 }
 
-# post_notes <pr> <file> <tag> — a non-empty notes file a subagent left for a person goes into the PR body's notes
-# section as one block, verbatim under `### <tag>`, then is deleted: only the body keeps it across a stop and a fresh
-# runner. The tag is written into the file first, so the file a failed write leaves is ready to add by hand.
+# post_notes <pr> <file> <tag> [<then>] — a non-empty notes file a subagent left for a person goes into the PR body's
+# notes section as one block, verbatim under `### <tag>`, then is deleted: only the body keeps it across a stop and a
+# fresh runner. The tag is written into the file first, so the file a failed write leaves is ready to add by hand;
+# <then> is what the caller's stop says to run after that.
 post_notes() {
   local n="$1" f="$2" body new why
   [ -s "$f" ] || return 0
   { printf '### %s\n\n' "$3"; cat "$f"; } >"$f.tmp" && mv "$f.tmp" "$f"
-  why="adding $f to PR #$n's body failed: add its contents to the PR body's Notes for a person section by hand (gh pr edit $n), then rm $f before a re-run (on Actions the file is in the run's artifact)"
-  [ "$PUBLISH" = yes ] || why="adding $f to $(local_body) failed: add its contents to that file's Notes for a person section by hand, then rm $f before a re-run"
+  why="adding $f to PR #$n's body failed: add its contents to the PR body's Notes for a person section by hand (gh pr edit $n), then rm $f before a re-run (on Actions the file is in the run's artifact)${4:+; then $4}"
+  [ "$PUBLISH" = yes ] || why="adding $f to $(local_body) failed: add its contents to that file's Notes for a person section by hand, then rm $f before a re-run${4:+; then $4}"
   body=$(pr_body_read "$n") || die "$why"
   new="$LOGS/pr-$n.notes-body.md"
   if grep -qxF "$NOTES_END" <<<"$body"; then
@@ -258,12 +377,30 @@ stop() { # <step> <reason> [<log>]; exit 1
 BEGIN='<!-- solve-feature:begin -->' END='<!-- solve-feature:end -->'
 # The notes section, inside begin/end: post_notes adds to it, describe carries it over verbatim.
 NOTES_BEGIN='<!-- solve-feature:notes:begin -->' NOTES_END='<!-- solve-feature:notes:end -->'
+# The notes the review settled, out of the notes section: fix adds to it, describe carries it over and never counts it.
+SETTLED_BEGIN='<!-- solve-feature:settled:begin -->' SETTLED_END='<!-- solve-feature:settled:end -->'
+# jq `blocks`: the notes section's {key: line number, value: line} entries, $nb/$ne its markers, split into one block
+# per note — its author from the tag post_notes wrote above it, `person` for text under none, so a coder's own `### `
+# headings stay in its block. `at` is the block's line numbers; `block` its tag and text as the body holds them.
+# A tag left after its note's text was deleted is no note. jq `section`: the body's lines as entries, from the notes
+# section's begin marker to its end marker, else to the body's end, as describe's sed range reads it.
+NOTE_BLOCKS='def blocks:
+  map(select(.value | IN($nb, $ne, "## Notes for a person", "Delete a note here once it is handled.") | not))
+  | reduce .[] as $e ([{author: "person", tag: null, at: [], lines: []}];
+      ([$e.value | capture("^### the (?<a>coder|fixer) of .* · [0-9]{4}-[0-9]{2}-[0-9]{2}$").a][0]) as $a
+      | if $a then . + [{author: $a, tag: $e.value, at: [$e.key], lines: []}]
+        else .[-1].lines += [$e.value] | .[-1].at += [$e.key] end)
+  | map(. + {text: (.lines | join("\n") | sub("^(\\s*\n)+"; "") | sub("\\s+$"; ""))})
+  | map(select(.text != "") | . + {block: ([.tag // empty] + .lines | join("\n") | sub("\\s+$"; ""))});
+def section: to_entries | ([.[] | select(.value == $nb) | .key][0]) as $b
+  | if $b == null then [] else .[$b:] | ([.[1:][] | select(.value == $ne) | .key][0]) as $f
+    | if $f == null then . else map(select(.key <= $f)) end end;'
 pr_title() { # <ref-slug> — the PRD's title when the CLI's note heads the spec, else the issue's own
   local t; t=$(head -n 1 "$LOGS/spec.md" | sed -nE 's/^<!-- PRD issue #[0-9]+: (.*) -->$/\1/p' | sed 's/^PRD: //')
   [ -n "$t" ] || t=$(grep -m1 '^# ' "$LOGS/$1.issue.md" | sed 's/^# //')
   printf '%s' "$t"
 }
-checks_lib() { [ -f "$CHECKS/run-checks.sh" ] || die "checks library not found ($CHECKS): install the coding-crew-lib skill beside solve-feature (npx skills add ypxing/coding-crew -s coding-crew-lib, adding -g at user level) or re-run install.sh"; }
+checks_lib() { [ -f "$CHECKS/run-checks.sh" ] || die "checks library not found ($CHECKS): install the coding-crew-lib skill beside solve-feature, from the source you installed solve-feature from (npx skills add <that source> -s coding-crew-lib, adding -g at user level) or re-run install.sh"; }
 
 # reopen_ref <step> <reason> <commit message> <recovery when reopen fails> [<log>] — make the closed $REF ready
 # again, so a plain re-run's coder takes it up instead of the tracker counting it landed; a failure stops at <step>.
@@ -301,14 +438,39 @@ pr_create_failed() {
   stop pr "$why; $REF is ready again with its work pushed to $BRANCH: $redo"
 }
 
+# commit_rewrites — after a passing run-checks.sh on a tree clean outside SETUP_FILES, what is left is exactly the
+# checks' rewrites (a `lint --fix`): one commit of its own. Tracked files only, as run-checks.sh fails a check that
+# creates one. Staged over `.`, then unstaged: git add refuses any pathspec naming an ignored path, an exclude too.
+commit_rewrites() {
+  git add -u -- . && git reset -q -- "${SETUP_FILES[@]}" || return 1
+  git diff --cached --quiet || git commit -q -m "Apply the checks' rewrites"
+}
+
+# discard_rewrites — after a failed run-checks.sh on the same clean tree, what is left is the checks' own output,
+# which a re-run makes again: dropped, so the stop leaves the clean tree a re-run starts from. Named in the checks'
+# log ($clog, the caller's), which the stop names. reset first: checkout restores from the index, where a check that
+# stages (lint-staged) leaves its output for the reopen commit to take. -ff: a nested repository a check made is its
+# output too, and one -f skips it. A failed discard is noted there and never skips that stop.
+discard_rewrites() {
+  local left; left=$(git status --porcelain -uall -- "${BRANCH_WORK[@]}" | cut -c4-)
+  [ -n "$left" ] || return 0
+  printf "solve-feature: discarded what the failed checks left, which a re-run makes again:\n%s\n" "$left" >>"$clog"
+  git reset -q -- "${BRANCH_WORK[@]}" && git checkout -q -- "${BRANCH_WORK[@]}" && git clean -ffdq -- "${BRANCH_WORK[@]}" ||
+    echo "solve-feature: discarding them failed (see above): clean the tree by hand before a re-run" >>"$clog"
+}
+
 # land — the coder left <branch> clean with <ref> closed: merge in origin's branch, gate with the checks, push,
 # open the draft PR if there is none; prints pr=<n>.
 land() {
-  local rs="${REF//\//_}" rc=0 again clog="$LOGS/${REF//\//_}.checks.log" f url
+  local rs="${REF//\//_}" rc=0 again clog="$LOGS/${REF//\//_}.checks.log" f checked
   [ -f "$LOGS/$rs.issue.md" ] || die "no saved issue for $REF: run next first"
   checks_lib
   [ "$(git branch --show-current)" = "$BRANCH" ] || stop solve "branch changed to '$(git branch --show-current)'"
-  # solve-issue's blocked leaves files a check rewrote for a human to commit, and its report says so.
+  # With a PR open a note goes into its body now, so no stop below loses it; start and next delete only a local file.
+  if [ -s "$LOGS/coder.notes.md" ]; then
+    pr_view
+    [ -z "$PR_N" ] || post_notes "$PR_N" "$LOGS/coder.notes.md" "the coder of $REF · $(date +%F)" "run land $SLUG $REF $BRANCH"
+  fi
   [ -z "$(git status --porcelain -- "${BRANCH_WORK[@]}")" ] || stop solve "working tree left dirty$([ ! -s "$LOGS/coder.report.md" ] || echo "; why: $LOGS/coder.report.md")"
   # solve-issue's close moves the issue out of `next`; still first means it stopped short (partial, blocked).
   again=$(node "$CLI" next --feature-slug "$SLUG") || rc=$?
@@ -328,12 +490,17 @@ land() {
     reopen_ref merge "$why" "Reopen $REF: its merge failed" "reopen $REF by hand, then $redo"
     stop merge "$why; $REF is ready again: $redo"
   fi
+  # The commit the checks passed on is recorded once the issue has landed: a stop below reopens it, unlanded.
+  rm -f "$LOGS/$rs.checks.head"
   rc=0; bash "$CHECKS/run-checks.sh" --project-root "$ROOT" >"$clog" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || discard_rewrites
   [ "$rc" != 3 ] || hand_back "no check commands known (DISCOVER): the coder discovered none" "run /setup-coding-crew, then re-run" "$clog"
   [ "$rc" = 0 ] || hand_back "run-checks.sh exit $rc" "fix the cause, then re-run" "$clog"
+  commit_rewrites || hand_back "committing the checks' rewrites failed (see above)" "commit them, then re-run" "$clog"
+  checked=$(git rev-parse HEAD)
   # Any failed push reopens the issue, unretried: an Actions runner's commits go with its job, so a closed issue
   # would count as landed work that exists nowhere. Here a re-run finds the commits, since start never resets a branch.
-  if [ "$PUBLISH" = yes ] && ! push -u origin "$BRANCH"; then
+  if ! push -u origin "$BRANCH"; then
     local why="git push failed: $PUSH_WHY"
     reopen_ref push "$why" "Reopen $REF: its push failed" "reopen $REF by hand, then re-run where git can push"
     stop push "$why; $REF is ready again: re-run where git can push (a re-run in this checkout starts from its unpushed commits)"
@@ -344,22 +511,19 @@ land() {
     # once a note lands, the notes section.
     f="$LOGS/pr-body.md"
     printf '%s\n' "$BEGIN" "Implemented by solve-feature (\`$SLUG\`) — in progress." "<!-- solve-feature:slug $SLUG -->" "$END" >"$f"
+    pr_open "$rs" "$f"
   fi
-  if [ -z "$PR_N" ] && [ "$PUBLISH" = no ]; then
-    pr_body_write local "$f" "$(pr_title "$rs")" || die "cannot write $(local_body)"
-    PR_N=local
-  elif [ -z "$PR_N" ]; then
-    rc=0; url=$(gh pr create --draft --title "$(pr_title "$rs")" --body-file "$f" 2>"$LOGS/pr-create.err") || rc=$?
-    cat "$LOGS/pr-create.err" >&2
-    [ "$rc" = 0 ] || pr_create_failed
-    PR_N="${url##*/}"; [[ "$PR_N" =~ ^[0-9]+$ ]] || die "gh pr create printed no PR URL: $url"
-  fi
+  # Pushed and on a PR, the issue has landed; a notes stop after this says how to add them by hand.
+  rm -f "$(landing)"
+  printf '%s\n' "$checked" >"$LOGS/$rs.checks.head"
   post_notes "$PR_N" "$LOGS/coder.notes.md" "the coder of $REF · $(date +%F)"
   echo "pr=$PR_N"
 }
 
 # sync — before the first review: merge origin's default branch (then origin's <branch>) into <branch>, gate a merge with the checks, push it,
-# and save HEAD as the head the reviewer starts from. A conflict exits 4 with the merge left in progress, printing
+# and save HEAD as the head the reviewer starts from. Prints review-base=: start's --review-since commit when origin's
+# default branch is in it and it is in HEAD, else empty — an older base would put the merged-in default branch's
+# commits under review, for the fixer to change. A conflict exits 4 with the merge left in progress, printing
 # conflicts=<files>; once someone finishes it, a re-run gates and pushes it. Success is judged here, never from
 # whoever resolved it: no merge in progress, a clean tree, the default branch in HEAD.
 sync() {
@@ -387,7 +551,7 @@ sync() {
     echo "conflicts=$MERGE_CONFLICTS"
     exit 4
   fi
-  rm -f "$LOGS/outcome"
+  rm -f "$LOGS/outcome" "$LOGS/result.json"
   # As in land: a commit someone else pushed to the branch would refuse the push, on every re-run. A branch never
   # pushed (PUBLISH=no) has no origin copy to merge.
   if git rev-parse -q --verify "refs/remotes/origin/$BRANCH" >/dev/null && ! merge_in "origin/$BRANCH"; then
@@ -402,11 +566,28 @@ sync() {
   if [ "$gate" = yes ]; then
     checks_lib
     bash "$CHECKS/run-checks.sh" --project-root "$ROOT" >"$clog" 2>&1 || rc=$?
+    [ "$rc" = 0 ] || discard_rewrites
     [ "$rc" != 3 ] || die "no check commands known (DISCOVER): run /setup-coding-crew, then re-run"
     [ "$rc" = 0 ] || die "run-checks.sh exit $rc on $BRANCH merged with origin/$default — log: $clog; once fixed and committed, re-run"
-    [ "$PUBLISH" = no ] || push -u origin "$BRANCH" || die "git push failed: $PUSH_WHY; once it can push, or once you have pushed it, re-run"
+    commit_rewrites || die "committing the checks' rewrites failed (see above): commit them, then re-run"
+    push -u origin "$BRANCH" || die "git push failed: $PUSH_WHY; once it can push, or once you have pushed it, re-run"
   fi
   git rev-parse HEAD >"$LOGS/review.base"
+  # The coder notes the body holds now, for the reviewer to judge: a note a person deleted is not judged.
+  pr_view
+  if [ -n "$PR_N" ]; then
+    local body notes="$LOGS/pr-$PR_N.coder-notes.json"
+    body=$(pr_body_read "$PR_N") || die "reading the PR body failed (see above): re-run sync $SLUG $BRANCH"
+    jq -n --rawfile s <(printf '%s\n' "$body") --arg nb "$NOTES_BEGIN" --arg ne "$NOTES_END" \
+      "$NOTE_BLOCKS"' [$s | split("\n") | section | blocks[] | select(.author == "coder") | .block]' >"$notes.tmp" ||
+      die "listing the PR body's coder notes failed (see above)"
+    if [ "$(jq length "$notes.tmp")" = 0 ]; then rm -f "$notes" "$notes.tmp"; else mv "$notes.tmp" "$notes"; fi
+  fi
+  local since; since=$(cat "$LOGS/review.since" 2>/dev/null || true)
+  if [ -n "$since" ] && git merge-base --is-ancestor "origin/$default" "$since" 2>/dev/null &&
+    git merge-base --is-ancestor "$since" HEAD 2>/dev/null; then echo "review-base=$since"
+  else echo "review-base="
+  fi
 }
 
 # The reviewer may run the tests and its own experiments but leaves the tree as it found it; what it left anyway
@@ -433,23 +614,63 @@ reviewed() {
   echo "findings=$(jq '.findings // [] | length' "$report")"
 }
 
+# settle_notes <report> <recovery> — each coder note the report marks settled whose block in pr-<n>.coder-notes.json
+# still matches one of the body's notes section exactly moves to the settled section, under its own heading and text and
+# the reviewer's why; then that file keeps only the coder notes still standing, for a second round, which runs no sync.
+# Fix calls it after its last stop and before the report moves, so a re-run reads the report against the file as its
+# reviewer saw it. Anything off its shape settles nothing: the note stands and holds the draft.
+settle_notes() {
+  local cn="$LOGS/pr-$PR.coder-notes.json" body out new="$LOGS/pr-$PR.settled-body.md" why
+  [ -f "$cn" ] || return 0
+  why="moving the notes the review settled into the PR body's Settled by the review section failed; nothing moved: $2"
+  body=$(pr_body_read "$PR") || stop fix "reading the PR body failed (see above): $2"
+  out=$(jq -n --rawfile s <(printf '%s\n' "$body") --rawfile c "$cn" --slurpfile rep "$1" \
+    --arg nb "$NOTES_BEGIN" --arg ne "$NOTES_END" --arg sb "$SETTLED_BEGIN" --arg se "$SETTLED_END" \
+    --arg slug "<!-- solve-feature:slug " --arg end "$END" "$NOTE_BLOCKS"'
+    def whole: type == "number" and . >= 0 and . == floor;
+    def at($v): [to_entries[] | select(.value == $v) | .key][0];
+    ($s | split("\n")) as $L
+    | ($c | try fromjson catch null | if type == "array" and all(.[]; type == "string") then . else [] end) as $list
+    | [ $rep[0].notes | if type == "array" then .[] else empty end
+        | select(type == "object" and .settled == true and (.why | type) == "string"
+                 and (.note | whole) and .note < ($list | length)) ] as $S
+    | ( reduce ($L | section | blocks[] | select(.author == "coder")) as $k ({used: [], moved: []};
+          . as $st
+          | ([$S[] | select($list[.note] == $k.block and (.note | IN($st.used[]) | not))][0]) as $hit
+          | if $hit then .used += [$hit.note] | .moved += [$k + {why: $hit.why}] else . end) ).moved as $m
+    | [$m[].at[]] as $drop
+    | [$L | to_entries[] | select(.key | IN($drop[]) | not) | .value] as $N
+    | [$m[] | (.block | split("\n"))[], "", "Settled by the review: \(.why | gsub("\\s*\n\\s*"; " "))", ""] as $E
+    | ( if ($m | length) == 0 then $L
+        elif ($N | at($se)) != null then ($N | at($se)) as $p | $N[:$p] + $E + $N[$p:]
+        else ( if ($N | at($ne)) != null then ($N | at($ne)) + 1
+               else [$N | to_entries[] | select((.value | startswith($slug)) or .value == $end) | .key][0] // ($N | length) end ) as $p
+          | $N[:$p] + [$sb, "## Settled by the review", ""] + $E + [$se] + $N[$p:]
+        end ) as $out
+    | {moved: ($m | length), body: ($out | join("\n")),
+       standing: [$out | section | blocks[] | select(.author == "coder") | .block]}') ||
+    stop fix "settling the review's notes failed (see above): $2"
+  if [ "$(jq .moved <<<"$out")" != 0 ]; then
+    jq -j .body <<<"$out" >"$new"
+    pr_body_write "$PR" "$new" || stop fix "$why"
+    rm -f "$new"
+  fi
+  if [ "$(jq '.standing | length' <<<"$out")" = 0 ]; then rm -f "$cn"; else jq .standing <<<"$out" >"$cn"; fi
+}
+
 # The fixer's edits are committed, then what others pushed to the branch merged in (git refuses a merge over staged
 # changes), then the checks run on that clean tree, so the push carries exactly what was gated.
 # fix — last stdout line `FIX: findings=<k> needs-attention=<a> review-again=yes|no`.
 fix() {
-  local report="$LOGS/pr-$PR.review.json" unfixed="$LOGS/pr-$PR.unfixed.md" clog="$LOGS/pr-$PR.checks.log"
-  local discarded="$LOGS/pr-$PR.discarded.md" headf="$LOGS/pr-$PR.head" head_oid spec rc=0 total severe moved=no again=no attention=""
+  local report="$LOGS/pr-$PR.review.json" unfixed="$LOGS/pr-$PR.unfixed.json" clog="$LOGS/pr-$PR.checks.log"
+  local discarded="$LOGS/pr-$PR.discarded.md" headf="$LOGS/pr-$PR.head" head_oid spec rc=0 total severe moved=no again=no
   local pr_name="PR #$PR" fresh="; or re-run in a fresh clone"
   [ "$PUBLISH" = yes ] || pr_name=$BRANCH fresh=""
   checks_lib
   # The round's first run keeps the PR's head, so a re-run after a person pushed the fix by hand still sees it moved.
   if [ -s "$headf" ]; then head_oid=$(head -n1 "$headf")
   else
-    if [ "$PUBLISH" = no ]; then
-      head_oid=$(cat "$LOGS/review.base" 2>/dev/null) || die "no saved head at $LOGS/review.base: run sync $SLUG $BRANCH first"
-    else
-      head_oid=$(gh pr view "$PR" --json headRefOid | jq -r '.headRefOid // empty') || die "gh pr view $PR failed"
-    fi
+    pr_head "$PR"; head_oid=$PR_HEAD
     printf '%s\n' "$head_oid" >"$headf"
   fi
   [ "$(git branch --show-current)" = "$BRANCH" ] || stop fix "branch changed to '$(git branch --show-current)'"
@@ -459,9 +680,14 @@ fix() {
   total=$(jq '.findings // [] | length' "$report")
   # crew-review's own severity field; a missing or unknown one is not severe.
   severe=$(jq '[.findings // [] | .[]? | select(.severity? | IN("CRITICAL", "HIGH", "MEDIUM"))] | length' "$report")
-  # Committed before the checks, so run-checks.sh's modified-files test also sees a check rewrite a file the fixer changed.
-  git add -A -- "${BRANCH_WORK[@]}"
+  # Committed before the checks, so what they leave is their own rewrites, committed apart.
+  # Listed by ls-files, not passed to git add: git add exits 1 on any pathspec naming an ignored path, an exclude too.
+  git ls-files -z -m -o --exclude-standard -- "${BRANCH_WORK[@]}" | xargs -0 -r git add -A -- ||
+    stop fix "git add failed (see above): stage and commit the fixer's edits by hand, then run fix $SLUG $PR $BRANCH, then describe $SLUG $PR"
   git diff --cached --quiet || git commit -q -m "Fix the review's findings$([ "$PUBLISH" = no ] || echo " on PR #$PR")"
+  # Before any stop below: a re-run's start deletes the file, so only the body keeps the note. After the commit, so a
+  # failed write leaves the clean tree start needs.
+  post_notes "$PR" "$LOGS/pr-$PR.notes.md" "the fixer of $pr_name's review · $(date +%F)" "run fix $SLUG $PR $BRANCH, then describe $SLUG $PR"
   # A failed fetch skips the merge: the push owns that failure.
   if fetch_branch && ! merge_in "origin/$BRANCH"; then
     local why="merging origin/$BRANCH into $BRANCH conflicts in $MERGE_CONFLICTS"
@@ -469,36 +695,65 @@ fix() {
     stop fix "$why; merge it by hand in this checkout, commit, then run fix $SLUG $PR $BRANCH, then describe $SLUG $PR$fresh"
   fi
   bash "$CHECKS/run-checks.sh" --project-root "$ROOT" >"$clog" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || discard_rewrites
   [ "$rc" != 3 ] || stop fix "no check commands known (DISCOVER): run /setup-coding-crew, then re-run" "$clog"
   [ "$rc" = 0 ] || stop fix "run-checks.sh exit $rc; once fixed and committed, run fix $SLUG $PR $BRANCH, then describe $SLUG $PR" "$clog"
-  [ "$PUBLISH" = no ] || push -u origin "$BRANCH" || stop fix "git push failed: $PUSH_WHY; once it can push, or once you have pushed it, run fix $SLUG $PR $BRANCH, then describe $SLUG $PR"
+  commit_rewrites || stop fix "committing the checks' rewrites failed (see above): commit them, then run fix $SLUG $PR $BRANCH, then describe $SLUG $PR" "$clog"
+  push -u origin "$BRANCH" || stop fix "git push failed: $PUSH_WHY; once it can push, or once you have pushed it, run fix $SLUG $PR $BRANCH, then describe $SLUG $PR"
   git rev-parse HEAD >"$LOGS/review.base"
-  post_notes "$PR" "$LOGS/pr-$PR.notes.md" "the fixer of $pr_name's review · $(date +%F)"
 
   # "Changed nothing" is no commit on the branch's own line past the round's head: what merge_in brought in sits
-  # behind a merge's second parent, and a fix committed here and pushed by hand still counts.
-  [ -z "$(git rev-list --first-parent --no-merges -n1 HEAD "^$head_oid")" ] || moved=yes
-  # Needs a person: the reviewer's gaps, an unmet spec, each line the fixer left in unfixed.md, and a fixer that
-  # changed nothing without saying why (it crashed or gave up).
-  attention=$(jq -r '.gaps // [] | .[] | tostring' "$report")
-  # The gaps already name what is unmet; the bare line is for an unmet spec with none named.
-  [ "$spec" = met ] || [ -n "$(jq -r '.gaps // [] | .[]' "$report")" ] || attention+=$'\n'"the reviewer found the spec unmet"
-  [ ! -f "$unfixed" ] || attention+=$'\n'"$(cat "$unfixed")"
-  [ ! -f "$discarded" ] || attention+=$'\n'"the reviewer changed the tree; discarded: $(paste -sd' ' "$discarded")"
-  [ "$total" = 0 ] || [ "$moved" = yes ] || [ -s "$unfixed" ] || attention+=$'\n'"the fixer changed nothing"
+  # behind a merge's second parent, and a fix committed here and pushed by hand still counts. The checks' rewrites are
+  # not the fixer's.
+  [ -z "$(git rev-list --first-parent --no-merges --invert-grep --grep="^Apply the checks' rewrites\$" -n1 HEAD "^$head_oid")" ] || moved=yes
+  # The round is kept for result.json, and the live paths emptied, so the next round's reviewer and fixer start from
+  # none. The checks log is copied: the PR writer reads the live one. Its 0-based index into result.json's rounds is
+  # its number less one: start deletes every round, and each fix adds the next.
+  local k=0 f n
+  for f in "$LOGS/pr-$PR".r[0-9]*.review.json; do
+    [[ "$f" =~ \.r([0-9]+)\.review\.json$ ]] && n=${BASH_REMATCH[1]} && [ "$n" -gt "$k" ] && k=$n || true
+  done
+  # Needs a person, one typed item each (result.schema.json's needs_attention): a spec not met (or gaps named), each
+  # finding the fixer left in unfixed.json, what the reviewer changed in the tree, and a fixer that changed nothing
+  # without saying why (it crashed or gave up). An unfixed.json off its shape is kept whole as one item, never dropped.
+  local items
+  items=$(jq -n --slurpfile rep "$report" --argjson round "$k" --arg moved "$moved" \
+    --rawfile u <([ ! -f "$unfixed" ] || cat "$unfixed") --arg has_u "$([ -f "$unfixed" ] && echo yes || echo no)" \
+    --rawfile d <([ ! -f "$discarded" ] || cat "$discarded") --arg has_d "$([ -f "$discarded" ] && echo yes || echo no)" '
+    ($rep[0]) as $r | ($r.findings // []) as $f | ($r.gaps // []) as $g
+    | def whole: type == "number" and . >= 0 and . == floor;
+      ($u | try fromjson catch null) as $p
+    | ( if $has_u == "no" then []
+        elif ($p | type) == "array" and all($p[]; type == "object" and (.why | type) == "string" and ((has("finding") | not) or (.finding | whole)))
+        then [$p[] | {type: "unfixed", round: $round}
+              + (if has("finding") then {finding, severity: ($f[.finding] | if type == "object" and (.severity | type) == "string" then .severity else null end)} else {severity: null} end)
+              + {why}]
+        else [{type: "unfixed", round: $round, severity: null, why: $u}] end ) as $un
+    | [ if $r.spec != "met" or ($g | length) > 0 then {type: "spec_unmet", round: $round, gaps: [range($g | length)]} else empty end ]
+      + $un
+      + [ if $has_d == "yes" then {type: "reviewer_changed_tree", paths: ($d | split("\n") | map(select(test("\\S"))))} else empty end ]
+      + [ if ($f | length) > 0 and $moved == "no" and ($un | length) == 0 then {type: "fixer_changed_nothing", round: $round} else empty end ]') || stop fix "building the round's needs-attention list failed (see above)"
+  settle_notes "$report" "run fix $SLUG $PR $BRANCH, then describe $SLUG $PR"
   # Fixes to a CRITICAL/HIGH/MEDIUM finding are worth reviewing again; SKILL.md caps that at one re-review.
   [ "$severe" = 0 ] || [ "$moved" = no ] || again=yes
-  rm -f "$unfixed"
-  # describe reads it: an empty file is a review with nothing needing a person.
-  grep -v '^[[:space:]]*$' <<<"$attention" >"$LOGS/pr-$PR.attention.md" || true
+  k="$LOGS/pr-$PR.r$((k + 1))"
+  jq -n --argjson c "$([ "$moved" = yes ] && echo true || echo false)" --arg h "$(cat "$LOGS/review.base")" \
+    '{fixer_changed_code: $c, checks_commit: $h}' >"$k.fix"
+  cp "$clog" "$k.checks.log"
+  [ ! -f "$unfixed" ] || mv "$unfixed" "$k.unfixed.json"
+  mv "$report" "$k.review.json"
+  # describe reads it: an empty list is a review with nothing needing a person.
+  printf '%s\n' "$items" >"$LOGS/pr-$PR.attention.json"
   # A second review round starts from the head its reviewer saw.
   rm -f "$headf"
-  echo "FIX: findings=$total needs-attention=$(grep -c . "$LOGS/pr-$PR.attention.md" || true) review-again=$again"
+  echo "FIX: findings=$total needs-attention=$(jq length <<<"$items") review-again=$again"
 }
 
-# unresolved_threads — sets UNRESOLVED to the count of $PR's unresolved review threads, every page, and PR_URL.
+# unresolved_threads — sets UNRESOLVED to the count of $PR's unresolved review threads, every page, and PR_URL. With
+# PUBLISH=no there is no PR, so none.
 UNRESOLVED="" PR_URL=""
 unresolved_threads() {
+  UNRESOLVED=0; [ "$PUBLISH" = yes ] || return 0
   local pages
   pages=$(gh api graphql --paginate -F owner='{owner}' -F repo='{repo}' -F pr="$PR" -f query='
     query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
@@ -514,14 +769,13 @@ unresolved_threads() {
 # ready PR with land's one-line body. A re-run rewrites all of it, text a person added included, but the notes
 # section, kept as the PR shows it.
 describe() {
-  local f="$LOGS/pr-$PR.summary.md" att="$LOGS/pr-$PR.attention.md" body="$LOGS/pr-$PR.body.md" title="" refs draft result
+  local f="$LOGS/pr-$PR.summary.md" att="$LOGS/pr-$PR.attention.json" datt="$LOGS/pr-$PR.describe-attention.json"
+  local body="$LOGS/pr-$PR.body.md" title="" refs result
   [ -f "$att" ] || die "no review result at $att: run fix $SLUG $PR <branch> first"
   BRANCH=$(git branch --show-current)
   # A review thread still open needs a person as much as fix's list does. Counted on every run, never written into
-  # fix's file, so a re-run counts afresh. Without a PR there are none.
-  UNRESOLVED=0; [ "$PUBLISH" = no ] || unresolved_threads
-  local need; need=$(cat "$att")
-  [ "$UNRESOLVED" = 0 ] || need=$(printf '%s\n%s unresolved review threads: %s' "$need" "$UNRESOLVED" "$PR_URL" | grep -v '^[[:space:]]*$')
+  # fix's file, so a re-run counts afresh.
+  unresolved_threads
   refs=$(node "$CLI" closing-refs --feature-slug "$SLUG") || die "closing-refs failed for '$SLUG' (see above)"
   # The spec is named, not copied: spec.md stays for the reviewer, and a person opens the PRD itself.
   local prd_head="" spec_line="Spec: feature \`$SLUG\`"
@@ -529,28 +783,61 @@ describe() {
   [[ ! "$prd_head" =~ ^'<!-- PRD issue #'([0-9]+): ]] || spec_line="Spec: PRD #${BASH_REMATCH[1]}, feature \`$SLUG\`"
   [ ! -f "$f" ] || title=$(head -n 1 "$f" | sed -n 's/^# //p')
   # The notes section as the body holds it now, so a note a person deleted stays deleted; with no note left, none.
-  local notes
+  local notes settled
   notes=$(pr_body_read "$PR") || die "reading PR $PR's body failed"
+  # The settled section is a record for a person, never a hold: carried over verbatim, never counted.
+  settled=$(sed -n "\|^$SETTLED_BEGIN\$|,\|^$SETTLED_END\$|p" <<<"$notes")
   notes=$(sed -n "\|^$NOTES_BEGIN\$|,\|^$NOTES_END\$|p" <<<"$notes")
-  grep -vxE "$NOTES_BEGIN|$NOTES_END|## Notes for a person|Delete a note here once it is handled\.|[[:space:]]*" <<<"$notes" | grep -q . || notes=""
+  # describe's own items, in their own file so a re-run replaces them: the open review threads, and one note per block
+  # of the notes section. The notes are what a coder or fixer says a person must do or decide, so they hold the draft;
+  # read from the body, they survive a stop and a fresh runner.
+  jq -n --rawfile s <(printf '%s\n' "$notes") --argjson count "$UNRESOLVED" --arg url "$PR_URL" \
+    --arg nb "$NOTES_BEGIN" --arg ne "$NOTES_END" "$NOTE_BLOCKS"'
+    [ if $count > 0 then {type: "unresolved_threads", count: $count, url: $url} else empty end ]
+    + [ $s | split("\n") | to_entries | blocks[] | {type: "note", author, text} ]' >"$datt" || die "building describe's needs-attention list failed (see above)"
+  # The Needs attention lines, one owner with the draft hold and result.json: fix's items and describe's, a gap or an
+  # unfixed finding read from the report of the round it names, and one pointer line for every note.
+  local need rep round
+  round=$(jq '[.[].round | numbers][0] // empty' "$att")
+  rep="$LOGS/pr-$PR.r$((${round:-0} + 1)).review.json"
+  need=$(jq -rs --slurpfile rep <(if [ -n "$round" ] && jq -e . "$rep" >/dev/null 2>&1; then cat "$rep"; else echo '{}'; fi) '
+    def line: tostring | gsub("\\s*\n\\s*"; " ");
+    ($rep[0] | if type == "object" then . else {} end) as $r | ($r.gaps // []) as $g | ($r.findings // []) as $f
+    | (.[0] + .[1]) as $items
+    | ( $items[]
+        | if .type == "spec_unmet" then (if (.gaps | length) > 0 then $g[.gaps[]] | line else "the reviewer found the spec unmet" end)
+          elif .type == "unfixed" then
+            if has("finding") then
+              ($f[.finding] | if type == "object" and (.location | type) == "string" then ", \(.location)" else "" end) as $loc
+              | "the fixer left finding #\(.finding) (\(.severity // "no severity")\($loc)) unfixed: \(.why | line)"
+            else "the fixer left a finding unfixed: \(.why | line)" end
+          elif .type == "reviewer_changed_tree" then "the reviewer changed the tree; discarded: \(.paths | join(" "))"
+          elif .type == "fixer_changed_nothing" then "the fixer changed nothing"
+          elif .type == "unresolved_threads" then "\(.count) unresolved review threads: \(.url)"
+          else empty end ),
+      ( if any($items[]; .type == "note") then "notes for a person, in the section below: delete each once it is handled" else empty end )' \
+    "$att" "$datt") || die "rendering the needs-attention list failed (see above)"
+  jq -e '.[] | select(.type == "note")' "$datt" >/dev/null || notes=""
+  # The Tested line's one writer: the last gate's own verdict lines, never the writer's prose.
+  local tested
+  tested=$(node "$SELF/result.mjs" --logs "$LOGS" --tested-line "pr-$PR.checks.log") || die "reading the checks log $LOGS/pr-$PR.checks.log failed (see above)"
   {
     echo "$BEGIN"
     # Written here, not by the writer subagent, so a reviewer always sees that agents wrote this PR.
     printf '> Written by solve-feature (`%s`): its coder, reviewer and fixer were agents; no person has read this body.\n\n' "$SLUG"
     # write-pr's summary minus its title line, which titles the PR instead.
     if [ -f "$f" ]; then if [ -n "$title" ]; then tail -n +2 "$f"; else cat "$f"; fi | sed '/./,$!d'; echo; fi
+    printf '%s\n\n' "$tested"
     if [ -n "$need" ]; then printf '## Needs attention\n\n'; sed '/^- /!s/^/- /' <<<"$need"; echo; fi
     [ -z "$notes" ] || printf '%s\n\n' "$notes"
+    [ -z "$settled" ] || printf '%s\n\n' "$settled"
     printf '%s\n\n' "$spec_line"
     [ -z "$refs" ] || printf '%s\n' "$refs"
     printf '%s\n' "<!-- solve-feature:slug $SLUG -->" "$END"
   } >"$body"
   pr_body_write "$PR" "$body" "$title" || die "writing PR $PR's body failed"
-  if [ -n "$need" ]; then result=needs-attention
-  elif [ "$PUBLISH" = no ]; then result=ready
-  else
-    result=ready draft=$(gh pr view "$PR" --json isDraft | jq -r '.isDraft') || die "gh pr view $PR failed"
-    [ "$draft" != true ] || gh pr ready "$PR" >/dev/null || die "gh pr ready $PR failed; the body is written, so run gh pr ready $PR by hand"
+  if [ "$(jq -s 'add | length' "$att" "$datt")" != 0 ]; then result=needs-attention
+  else result=ready; pr_ready "$PR"
   fi
   # Without a PR the branch names the result: the person opens the PR from it, with the body in local_body's file.
   [ "$PUBLISH" = yes ] || { outcome "$result branch=$BRANCH"; echo "$result branch=$BRANCH"; return 0; }

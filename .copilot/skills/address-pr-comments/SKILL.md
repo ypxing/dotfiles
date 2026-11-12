@@ -2,9 +2,9 @@
 name: address-pr-comments
 description: >
   Fetches every review comment on the current branch's open pull request, challenges each one critically,
-  implements the sensible ones with TDD, commits the touched files and prints a summary; on a solve-feature PR
-  it instead files the accepted ones as one issue of the PR's feature, runs solve-feature on it and replies on
-  each thread. Use when a PR has review comments to work through. Trigger with /address-pr-comments.
+  implements the sensible ones with TDD, commits the touched files and prints a summary; run non-interactively it
+  also pushes that commit to the PR's branch and replies on each thread; on a solve-feature PR it instead files the
+  accepted ones as one issue of the PR's feature, runs solve-feature on it and replies on each thread. Use when a PR has review comments to work through. Trigger with /address-pr-comments.
 argument-hint: "Optional PR number or URL (defaults to current branch's open PR)"
 ---
 
@@ -27,9 +27,9 @@ or article a comment links, library docs) are fine, and help judge whether a rev
 <!-- fragment:missing-library -->
 **Shared scripts.** The scripts this skill runs live in the `coding-crew-lib` skill, installed beside it at
 `<skill-dir>/../coding-crew-lib` (`<skill-dir>` being the directory you read this file from). Before the first
-command that runs one, check that directory exists. If it does not, stop and tell the user to install it at this
-skill's scope, `npx skills add ypxing/coding-crew -s coding-crew-lib` (adding `-g` when this skill is installed at
-user level), or to re-run coding-crew's `install.sh`.
+command that runs one, check that directory exists. If it does not, stop and tell the user to install it from the
+source and at the scope they installed this skill from (`npx skills add <that source> -s coding-crew-lib`, adding
+`-g` when this skill is installed at user level), or to re-run coding-crew's `install.sh`.
 <!-- /fragment:missing-library -->
 
 ## Step 0 — Branch safety check
@@ -43,7 +43,11 @@ bash "<skill-dir>/../coding-crew-lib/scripts/git-workflow/branch-safety-check.sh
 ## Step 0.1 — Check prerequisites
 
 `PROJECT_ROOT` is this checkout, `git rev-parse --show-toplevel`; carry it as a literal, since each
-bash call is a fresh shell. Do not install dependencies up front. Run project commands through
+bash call is a fresh shell. Do not install dependencies up front. Run a project check (the suite, lint, typecheck)
+by its key through `bash "<skill-dir>/../coding-crew-lib/scripts/checks/run-checks.sh" --project-root "$PROJECT_ROOT"`,
+never by retyping its command line; when it prints `DISCOVER` (no dev commands file), run
+`(cd "$PROJECT_ROOT" && bash "<skill-dir>/../coding-crew-lib/scripts/checks/discover-commands.sh")`, follow its
+prompt, then re-run `run-checks.sh`. Run every other project command through
 `bash "<skill-dir>/../coding-crew-lib/scripts/checks/run.sh" --project-root "$PROJECT_ROOT" -- "<command>"`; only when
 one fails for a missing dependency (module-not-found, import error, test runner not found) invoke the
 `dep-install` skill, with `PROJECT_ROOT` set, then retry the command once.
@@ -52,7 +56,8 @@ one fails for a missing dependency (module-not-found, import error, test runner 
 CLI is `TRACKER=<skill-dir>/../coding-crew-lib/scripts/tracker/cli.mjs`, run as `node "$TRACKER" <op> …`.
 
 **Non-interactive run.** A run whose prompt says it is non-interactive (`Use the address-pr-comments skill on
-PR #<n>; this run is non-interactive`) asks nothing: Step 3 decides without confirmation, as it says.
+PR #<n>; this run is non-interactive`) asks nothing: Step 3 decides without confirmation, as it says, and on a PR that is not solve-feature's Step 5.5
+pushes the commit.
 
 ## Step 1 — Identify the PR
 
@@ -68,6 +73,14 @@ Confirm the PR number with the user before proceeding if it is ambiguous. Keep `
 line) is solve-feature's. Its `<slug>` is the one the block's `<!-- solve-feature:slug <slug> -->`
 line names. The head branch alone never makes a PR solve-feature's: its name is the run's choice
 (`--branch`). On one, also keep the PR's `headRefName` and `isDraft` (`gh pr view <n> --json headRefName,isDraft`).
+
+**Any other PR, non-interactive.** Keep its `body`, `headRefName`, `headRefOid`, `isCrossRepository` and `author`
+(`gh pr view <n> --json body,headRefName,headRefOid,isCrossRepository,author`). Stop here, naming both shas, unless
+`git rev-parse HEAD` equals `headRefOid`: Step 3 judges threads against this checkout and Step 5.5 pushes all of it.
+Say the checkout must be at the PR's head (`gh pr checkout <n>`) and that a commit a refused push left local must be
+dealt with first. Stop too when `git status --porcelain` lists any staged, modified or untracked path, naming those
+paths and leaving them as they are (no stash, no discard): Step 5's commit takes the whole index, so they would be
+pushed as the review fix.
 
 ## Step 2 — Fetch all review comments
 
@@ -86,7 +99,7 @@ omitted. On a non-zero exit, stop with its stderr.
 Triage each thread as one item, its replies read together, keeping its node `id` and URL. Skip a thread whose
 `isResolved` is true unless the user says otherwise.
 
-**Which threads a round handles, on a solve-feature PR:** the unresolved ones whose last comment in the script's
+**Which threads a round handles, on a solve-feature PR or on any non-interactive run:** the unresolved ones whose last comment in the script's
 output is not by the identity you post as — your `gh api user --jq .login`, `github-actions` on GitHub Actions. GraphQL names a bot
 without the `[bot]` suffix REST gives it, so compare logins with that suffix removed. A thread you already
 answered waits until someone replies on it, so a repeated round re-posts and re-files nothing. Its top-level
@@ -126,8 +139,13 @@ Ask the user to confirm or override any **Debatable** or **Dismiss** entries bef
   `copilot-pull-request-reviewer`, as GraphQL names it); a person's or an allowlisted bot's (`github.trustedBots`)
   stays open for a person.
 
-A reply that leaves a thread open for a person asks them to answer by replying on it: a reply starts the next round
-on GitHub Actions, resolving the thread alone does not.
+On a solve-feature PR, a reply that leaves a thread open for a person asks them to answer by replying on it: a reply
+starts the next round on GitHub Actions, resolving the thread alone does not.
+
+**Non-interactive on any other PR**, the PR's body stands in for the feature's spec. A request in the areas the ground rules guard
+gets the reply above and no edit in Step 4, with the thread left open. Every reply that leaves a thread open for a
+person @mentions the PR's author, in place of the feature root's assignees, and says to answer by replying on the
+thread and to ask for another round: a reply starts a round by itself only on a solve-feature PR on GitHub Actions.
 
 Every reply, resolve and unresolve goes through `gh api graphql` (`addPullRequestReviewThreadReply`,
 `resolveReviewThread`, `unresolveReviewThread`, each on the thread's node `id`).
@@ -195,13 +213,39 @@ bash "<skill-dir>/../coding-crew-lib/scripts/git-workflow/commit-changes.sh" \
   --coauthor "<your agent name> <your agent's commit email>"
 ```
 
-Do not push — leave that to the user.
+Interactively: Do not push — leave that to the user.
+
+## Step 5.5 — Non-interactive, not a solve-feature PR: push, then close the threads
+
+Only on a non-interactive run (Step 0.1) on a PR that is not solve-feature's, when Step 5 made a commit; otherwise
+go to Step 6. Whoever started the run consented to this push. Push Step 5's commit to the PR's head branch, never
+forcing:
+
+```bash
+git push origin HEAD:<headRefName>
+```
+
+A PR from a fork (`isCrossRepository` true) has no head branch on `origin`: do not push, and treat it as refused,
+with that as the reason.
+
+Then confirm the push reached the PR: `gh pr view <n> --json headRefOid` must equal `git rev-parse HEAD`. GitHub
+updates a PR's head a few seconds after the push, so re-read it every 5 seconds for up to 30 seconds before deciding.
+When it still does not match (`origin` is a fork or another repo), the push counts as refused, with that as the reason.
+
+- **Pushed** — on each thread the commit fixes, reply `Fixed in <sha>` (`git rev-parse --short HEAD`) and resolve it
+  through `resolveReviewThread` (Step 3's mutations). The reply follows the push because a resolved thread is skipped
+  on later rounds, so a `Fixed` naming a commit the branch doesn't have would stay wrong.
+- **Refused** — post no `Fixed` reply and resolve none of those threads, so they stay open for the next round. Do not
+  retry or rebase: the commit stays local, and Step 6's summary quotes git's reason.
+
+The replies Step 3 posted on Debatable and dismissed threads do not depend on the push.
 
 ## Step 6 — Summary
 
 Print a markdown summary with three sections. On a solve-feature PR add the issue Step 3.5 filed (or that it
 filed none), solve-feature's outcome line, and each handled thread's end state (resolved, unresolved again, or
-left open for whom):
+left open for whom). On a non-interactive run on any other PR add the push's result (the sha pushed, or git's reason
+quoted with the commit left local) and each handled thread's end state:
 
 ### Addressed
 

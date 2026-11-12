@@ -48,13 +48,14 @@ function parseArgs(op, argv, { positionals = 0, values = [], flags = [], optiona
 
 const USAGE = {
   fetch: "fetch <ref> [--comments]",
+  status: "status <ref>",
   features: "features",
   prd: "prd --feature-slug S",
   next: "next --feature-slug S",
   "closing-refs": "closing-refs --feature-slug S",
   known: "known --feature-slug S --out DIR",
   spec: "spec --feature-slug S",
-  "publish-issues": "publish-issues --feature-slug S --drafts DIR [--replace | --append]",
+  "publish-issues": "publish-issues --feature-slug S --drafts DIR [--replace | --append | --rebuild]",
   "publish-prd": "publish-prd --feature-slug S --title T --body-file F",
   rewrite: "rewrite <ref> --body-file F --status ST --feature-slug S",
   "mark-done": "mark-done <ref> [--force]",
@@ -184,11 +185,12 @@ function rewriteBlockedBy(text, refs, { drafts = new Set(), knownRef = () => nul
  * compared by blocker ref (so a retitled github issue still matches) or else by name: a typo would
  * otherwise become a blocker that never resolves, or under github an unrelated `Issue #<n>`.
  */
-function checkExistingBlockers(existing, { tracker, mainRoot, featureSlug, exec, dir }) {
+function checkExistingBlockers(existing, { tracker, mainRoot, featureSlug, exec, dir, rebuild = false }) {
   const key = (name) => tracker.knownBlockerRef?.(name) ?? name;
+  // A rebuild removes the feature's issues before it publishes, so none of them can block a draft.
+  const issues = rebuild ? [] : tracker.listFeatureIssues(mainRoot, { featureSlug, exec });
   const known = new Set(
-    tracker
-      .listFeatureIssues(mainRoot, { featureSlug, exec })
+    issues
       .filter((i) => !tracker.isPrdIssue(i))
       .map((i) => key(basename(tracker.knownFile(i).name))),
   );
@@ -206,7 +208,8 @@ function knownIssues(tracker, mainRoot, featureSlug, exec) {
 }
 
 /**
- * One `known` file as a spec section: `### <name> — <title>`, then the file without its first `# <title>` line,
+ * One `known` file as a spec section: a `<!-- spec-issue: <name> -->` line, so a reader tells a section from a
+ * heading in the PRD or an issue's own prose, then `### <name> — <title>`, then the file without its first `# <title>` line,
  * every task box a plain bullet (GitHub counts a body's boxes as its open tasks).
  */
 function specSection(name, text) {
@@ -223,7 +226,7 @@ function specSection(name, text) {
     .replace(/^([ \t]*)[-*] \[[ xX]\] /gm, "$1- ")
     .replace(/^\s*\n/, "")
     .replace(/\s*$/, "\n");
-  return `### ${id} — ${title}\n\n${body}`;
+  return `<!-- spec-issue: ${id} -->\n### ${id} — ${title}\n\n${body}`;
 }
 
 const OPS = {
@@ -258,6 +261,17 @@ const OPS = {
   },
 
   /** The ref of the issue an unattended loop runs next: each backend's dispatch rule, lowest first. */
+  /** The issue's status as its backend means it (index.mjs): `done`, `wontfix`, a triage status, or empty. */
+  async status(argv, { tracker, mainRoot, exec, cwd, out }) {
+    const args = parseArgs("status", argv, { positionals: 1 });
+    const ref = tracker.validateRef(mainRoot, args._[0], { cwd });
+    if (ref === null) throw new UsageError(`status: invalid ref: ${args._[0]}`);
+    const status = tracker.issueStatus(mainRoot, ref, { exec });
+    if (status === null) return EXIT.NOT_FOUND;
+    out(`${status}\n`);
+    return EXIT.OK;
+  },
+
   async next(argv, { tracker, mainRoot, exec, out }) {
     const args = parseArgs("next", argv, { values: ["feature-slug"] });
     const issues = tracker.selectDispatchable(mainRoot, { featureSlug: args["feature-slug"], exec });
@@ -307,20 +321,26 @@ const OPS = {
   },
 
   async "publish-issues"(argv, { tracker, mainRoot, exec, cwd, out, err }) {
-    const args = parseArgs("publish-issues", argv, { values: ["feature-slug", "drafts"], flags: ["replace", "append"] });
-    if (args.replace && args.append) throw new UsageError(`publish-issues: usage: ${USAGE["publish-issues"]}`);
+    const args = parseArgs("publish-issues", argv, { values: ["feature-slug", "drafts"], flags: ["replace", "append", "rebuild"] });
+    if ([args.replace, args.append, args.rebuild].filter(Boolean).length > 1) throw new UsageError(`publish-issues: usage: ${USAGE["publish-issues"]}`);
     const featureSlug = args["feature-slug"];
     const append = Boolean(args.append);
+    const rebuild = Boolean(args.rebuild);
+    if (rebuild && !tracker.rebuildGuard) throw new Error("publish-issues: --rebuild needs the local tracker; this repo's tracker does not take it");
     const dir = resolve(cwd, args.drafts);
     const { drafts, blockersOf, order } = readDrafts(dir);
     const existing = [...new Set([...drafts.values()].flatMap((d) => blockedByFiles(d.text).filter((m) => !drafts.has(m))))];
-    const refused = append ? null : tracker.publishGuard?.(mainRoot, { featureSlug, replace: Boolean(args.replace), blockers: existing });
+    const refused = rebuild
+      ? tracker.rebuildGuard(mainRoot, { featureSlug })
+      : append
+        ? null
+        : tracker.publishGuard?.(mainRoot, { featureSlug, replace: Boolean(args.replace), blockers: existing });
     if (refused) {
       err(`${refused.message}\n`);
       return refused.code;
     }
-    if (existing.length) checkExistingBlockers(existing, { tracker, mainRoot, featureSlug, exec, dir });
-    const publisher = tracker.beginPublish(mainRoot, { featureSlug, drafts: order, replace: Boolean(args.replace), append, exec });
+    if (existing.length) checkExistingBlockers(existing, { tracker, mainRoot, featureSlug, exec, dir, rebuild });
+    const publisher = tracker.beginPublish(mainRoot, { featureSlug, drafts: order, replace: Boolean(args.replace), append, rebuild, exec });
     const refs = new Map();
     const created = [];
     for (const file of order) {
