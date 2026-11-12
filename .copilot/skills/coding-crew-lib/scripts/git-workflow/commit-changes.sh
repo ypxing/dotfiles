@@ -3,6 +3,9 @@ set -euo pipefail
 
 # Commit changes with standardized format
 # Usage: commit-changes.sh --message "msg" --files "file1 file2" [--coauthor "Name <email>"] [--prefix "[slug]"]
+# Exit: 0 committed; 3 the named files left nothing staged; 1 any other error.
+
+PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
 
 MESSAGE=""
 FILES=()
@@ -16,9 +19,14 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --files)
-      # Space-separated list for simple cases. For paths with spaces, pass --files once per file.
-      IFS=' ' read -ra _batch <<< "$2"
-      FILES+=("${_batch[@]}")
+      # A value naming one path (on disk or tracked) is that path, spaces and all; any other is a
+      # space-separated list. So a path with a space is passed as its own --files.
+      if [ -e "$PROJECT_ROOT/$2" ] || git -C "$PROJECT_ROOT" ls-files --error-unmatch -- "$2" >/dev/null 2>&1; then
+        FILES+=("$2")
+      else
+        IFS=' ' read -ra _batch <<< "$2"
+        FILES+=("${_batch[@]}")
+      fi
       shift 2
       ;;
     --coauthor)
@@ -47,13 +55,17 @@ if [ ${#FILES[@]} -eq 0 ]; then
   exit 1
 fi
 
-PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
-
 # Only the named files, never `git add -A`.
 echo "Staging files:"
 for file in "${FILES[@]}"; do
   echo "  - $file"
-  git -C "$PROJECT_ROOT" add "$file"
+  # A path on neither disk nor index that git history knows was deleted by an earlier commit: nothing to stage.
+  if [ ! -e "$PROJECT_ROOT/$file" ] && [ -n "$file" ] \
+    && ! git -C "$PROJECT_ROOT" ls-files --error-unmatch -- "$file" >/dev/null 2>&1 \
+    && [ -n "$(git -C "$PROJECT_ROOT" log -1 --format=%H -- "$file" 2>/dev/null)" ]; then
+    continue
+  fi
+  git -C "$PROJECT_ROOT" add "$file" || exit 1
 done
 
 if [ -n "$PREFIX" ]; then
@@ -68,4 +80,13 @@ if [ -n "$COAUTHOR" ]; then
 Co-authored-by: ${COAUTHOR}"
 fi
 
-git -C "$PROJECT_ROOT" commit -m "$FULL_MESSAGE" && git -C "$PROJECT_ROOT" log -1 --oneline
+# Exit 3, not git's 1, so a caller can chain this and still go on when the work was already committed.
+if git -C "$PROJECT_ROOT" diff --cached --quiet; then
+  echo "nothing to commit: the named files have no changes"
+  exit 3
+fi
+
+if ! git -C "$PROJECT_ROOT" commit -m "$FULL_MESSAGE"; then
+  exit 1
+fi
+git -C "$PROJECT_ROOT" log -1 --oneline

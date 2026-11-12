@@ -170,6 +170,13 @@ export function fetchIssue(mainRoot, path) {
   return { title: issue.title, body };
 }
 
+/** The status of the issue at `path`, `done` once it is in `done/`, found there by its `open/` path too; null for neither. */
+export function issueStatus(mainRoot, path) {
+  const target = doneTarget(mainRoot, path);
+  if (target.alreadyDone) return "done";
+  return target.missing ? null : parseIssue(path).status;
+}
+
 /** The feature's PRD, `.coding-crew/scratch/<slug>/PRD.md`, or null when there is none. */
 export function readPrd(mainRoot, { featureSlug } = {}) {
   const path = join(mainRoot, SCRATCH, featureSlug, "PRD.md");
@@ -216,6 +223,22 @@ export function publishGuard(mainRoot, { featureSlug, replace = false, blockers 
   return null;
 }
 
+/** The file `publish-issues --rebuild` leaves in a feature directory it made: the only kind it may remove. */
+const REBUILT = ".rebuilt";
+
+/**
+ * `publish-issues --rebuild`'s guard: a feature directory without the marker an earlier `--rebuild` left is someone's
+ * real feature, never removed (exit 4). Null when the rebuild may go ahead.
+ */
+export function rebuildGuard(mainRoot, { featureSlug } = {}) {
+  const dir = join(mainRoot, SCRATCH, featureSlug);
+  if (!existsSync(dir) || existsSync(join(dir, REBUILT))) return null;
+  return {
+    code: 4,
+    message: `publish-issues: ${SCRATCH}/${featureSlug} exists and no --rebuild made it, so --rebuild will not remove it. Move it aside, or use another feature slug, then re-run.`,
+  };
+}
+
 /**
  * `.coding-crew/scratch/.gitignore` holding `*`, unless one exists: issue files are never meant to be committed,
  * and a consuming repo's own .gitignore need not know about `.coding-crew/scratch/` for its tree to stay clean.
@@ -229,10 +252,13 @@ function ignoreScratch(mainRoot) {
 
 /**
  * `publish-issues`' local side: drafts numbered from one past the feature's highest issue number. With
- * `append`, the feature's `issues-deps.json` keeps its entries and gains the drafts'.
+ * `append`, the feature's `issues-deps.json` keeps its entries and gains the drafts'. With `rebuild` (its guard
+ * passed), the feature's directory is removed first and given the rebuild marker.
  */
-export function beginPublish(mainRoot, { featureSlug, drafts, replace = false, append = false } = {}) {
-  const issues = join(mainRoot, SCRATCH, featureSlug, "issues");
+export function beginPublish(mainRoot, { featureSlug, drafts, replace = false, append = false, rebuild = false } = {}) {
+  const feature = join(mainRoot, SCRATCH, featureSlug);
+  if (rebuild) rmSync(feature, { recursive: true, force: true });
+  const issues = join(feature, "issues");
   const openDir = join(issues, "open");
   const existing = [...stateFiles(mainRoot, featureSlug, "open"), ...stateFiles(mainRoot, featureSlug, "done")];
   const base = Math.max(0, ...existing.map((f) => Number(issueNumber(f) ?? 0)));
@@ -242,6 +268,8 @@ export function beginPublish(mainRoot, { featureSlug, drafts, replace = false, a
   if (replace) for (const f of stateFiles(mainRoot, featureSlug, "open")) rmSync(join(openDir, f));
   ignoreScratch(mainRoot);
   mkdirSync(openDir, { recursive: true });
+  // Written before the first draft, so a publish that stops part-way can still be rebuilt.
+  if (rebuild) writeFileSync(join(feature, REBUILT), "");
   return {
     create(draft) {
       const name = names.get(draft.file);
